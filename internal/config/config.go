@@ -74,9 +74,12 @@ type Config struct {
 	LoginEventsRetentionDays int
 	AuditRetentionDays       int
 
-	// Admin (cmd/admin)
-	AdminListenAddr string
-	SessionTTL      time.Duration
+	// Admin (cmd/admin). ADMIN_ALLOW_WILDCARD_BIND is the explicit
+	// operator opt-in for containerized wildcard binds whose port mapping
+	// is only reachable on a controlled internal network.
+	AdminListenAddr        string
+	AdminAllowWildcardBind bool
+	SessionTTL             time.Duration
 
 	// Observability. Both default OFF; when enabled, /metrics is served on
 	// the API listener (gate it at the reverse proxy) and pprof only answers
@@ -185,8 +188,9 @@ func Load() (*Config, error) {
 		LoginEventsRetentionDays: envInt("LOGIN_EVENTS_RETENTION_DAYS", 90),
 		AuditRetentionDays:       envInt("AUDIT_RETENTION_DAYS", 365),
 
-		AdminListenAddr: env("ADMIN_LISTEN_ADDR", "127.0.0.1:8081"),
-		SessionTTL:      envDur("ADMIN_SESSION_TTL", 8*time.Hour),
+		AdminListenAddr:        env("ADMIN_LISTEN_ADDR", "127.0.0.1:8081"),
+		AdminAllowWildcardBind: envBool("ADMIN_ALLOW_WILDCARD_BIND", false),
+		SessionTTL:             envDur("ADMIN_SESSION_TTL", 8*time.Hour),
 
 		MetricsEnabled: envBool("METRICS_ENABLED", false),
 		PprofEnabled:   envBool("PPROF_ENABLED", false),

@@ -27,22 +27,21 @@ var defaultRegistry = &Registry{counters: map[string]*counter{}}
 // Default returns the process-wide registry.
 func Default() *Registry { return defaultRegistry }
 
-// Counter names (fixed vocabulary; the admin dashboard reads the same
-// values through Snapshot).
+// Counter names (fixed vocabulary; every name is wired — the admin
+// dashboard reads the same values through Snapshot). These are PROCESS
+// counters: they reset on restart and describe the CURRENT instance since
+// boot — never long-term business statistics (those are DB aggregates).
 const (
-	HTTPRequestsTotal  = "http_requests_total"
-	HTTP5xxTotal       = "http_5xx_total"
-	MailSentTotal      = "mail_sent_total"
-	MailFailedTotal    = "mail_failed_total"
-	SyncPushBatches    = "sync_push_batches_total"
-	SyncPushConflicts  = "sync_push_conflicts_total"
-	SyncPullRequests   = "sync_pull_requests_total"
-	AuthLoginsTotal    = "auth_logins_total"
-	AuthFailedLogins   = "auth_failed_logins_total"
-	AuthRefreshesTotal = "auth_refreshes_total"
-	TombstoneGcRuns    = "maintenance_gc_runs_total"
-	MaintenanceDeleted = "maintenance_rows_deleted_total"
-	LoginEventsPruned  = "login_events_pruned_total"
+	HTTPRequestsTotal  = "http_requests_total"            // countingMiddleware
+	HTTP5xxTotal       = "http_5xx_total"                 // countingMiddleware
+	MailSentTotal      = "mail_sent_total"                // MeteredSender
+	MailFailedTotal    = "mail_failed_total"              // MeteredSender
+	SyncPushBatches    = "sync_push_batches_total"        // syncapi push
+	SyncPushConflicts  = "sync_push_conflicts_total"      // syncapi push results
+	SyncPullRequests   = "sync_pull_requests_total"       // syncapi pull
+	TombstoneGcRuns    = "maintenance_gc_runs_total"      // cleanup loop
+	MaintenanceDeleted = "maintenance_rows_deleted_total" // cleanup loop
+	LoginEventsPruned  = "login_events_pruned_total"      // cleanup loop
 )
 
 // Inc atomically adds one to the named counter, creating it on first use.

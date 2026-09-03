@@ -48,10 +48,6 @@ type templateData struct {
 	NewEmail string
 	// AccountDeletion.
 	RequestedAt string
-	// Pre-escaped values for the HTML templates (exported: text/template
-	// can only reach exported fields).
-	CodeHTML string
-	LinkHTML string
 }
 
 var tplCache = map[string]*template.Template{}
@@ -74,10 +70,9 @@ func Render(id string, data *templateData) (*Message, error) {
 	if data == nil {
 		data = &templateData{}
 	}
-	// Pre-escape values that appear inside HTML anchors/code blocks. The
-	// text templates receive the raw values.
-	data.CodeHTML = template.HTMLEscapeString(data.Code)
-	data.LinkHTML = template.HTMLEscapeString(data.Link)
+	// NOTE: values are interpolated RAW here; html/template applies
+	// contextual auto-escaping at execution time (text gets HTML-escaped,
+	// {{.Link}} inside href= gets URL-escaped) — the single escaping layer.
 
 	var textBuf, htmlBuf strings.Builder
 	if err := tplFor(id, "txt").Execute(&textBuf, data); err != nil {

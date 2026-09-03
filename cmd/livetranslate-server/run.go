@@ -113,7 +113,7 @@ func runServe() error {
 	accountapi.NewHandler(st, authH, authSvc).Register(mux)
 
 	// Public web surfaces: reset deep-link landing + AASA.
-	webapp.NewHandler(cfg, st).Register(mux)
+	webapp.NewHandler(cfg, st, authSvc, trust).Register(mux)
 
 	// Internal metrics (aggregate counters only). Gate at the reverse proxy
 	// — the endpoint itself has no auth by design (Prometheus scrape).

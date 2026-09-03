@@ -104,9 +104,11 @@
     <button type="submit">取消待删除（恢复账号）</button>
   </form>
   {{else if not .Data.DeletedAt}}
-  <form method="post" action="/users/{{.Data.ID}}/request-deletion" class="row">
+  <form method="post" action="/users/{{.Data.ID}}/request-deletion" class="row"
+        onsubmit="return true">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <input type="text" name="reason" placeholder="启动删除原因（必填，写入审计日志）" required>
+    <input type="text" name="confirm" placeholder="输入 删除 确认" required pattern="删除">
     <button type="submit" class="danger">启动账号删除（待删除状态）</button>
   </form>
   {{end}}

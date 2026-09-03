@@ -70,6 +70,12 @@ func (m *Manager) NewAccessToken(userID, deviceID, role string) (string, time.Du
 // VerifyAccessToken accepts the CURRENT signing key and, when configured,
 // the PREVIOUS key (verification only — supports zero-downtime rotation;
 // access tokens are short-lived so the old key retires with them).
+//
+// Determinism: the algorithm set is LOCKED to HS256 (jwt.WithValidMethods)
+// in every attempt — no alg-header confusion, no downgrade; the issuer is
+// fixed; and only the two operator-configured secrets are ever tried, in a
+// fixed order (current first, previous on signature failure). An attacker
+// cannot influence which keys are consulted.
 func (m *Manager) VerifyAccessToken(raw string) (*AccessClaims, error) {
 	claims, err := m.parseWithSecret(raw, m.secret)
 	if err != nil && m.secretPrevious != nil {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -227,11 +228,21 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 
 // userQueryFromRequest reads the list filters, preserving every parameter
 // for the pager/search form (query conditions survive pagination).
+// Bounds on query parameters (parameterized SQL everywhere; the caps keep
+// pathological inputs cheap: huge page offsets and multi-KB LIKE needles).
+const (
+	maxUserListPage  = 10000
+	maxUserSearchLen = 256
+)
+
 func userQueryFromRequest(r *http.Request) UserQuery {
 	q := r.URL.Query()
 	pageNo, _ := strconv.Atoi(q.Get("page"))
 	if pageNo < 1 {
 		pageNo = 1
+	}
+	if pageNo > maxUserListPage {
+		pageNo = maxUserListPage
 	}
 	sort := q.Get("sort")
 	if sort != "last_login" && sort != "last_sync" {
@@ -249,8 +260,12 @@ func userQueryFromRequest(r *http.Request) UserQuery {
 	default:
 		provider = ""
 	}
+	search := strings.TrimSpace(q.Get("q"))
+	if len(search) > maxUserSearchLen {
+		search = search[:maxUserSearchLen]
+	}
 	return UserQuery{
-		Search:   q.Get("q"),
+		Search:   search,
 		Status:   status,
 		Provider: provider,
 		Sort:     sort,
@@ -349,15 +364,20 @@ func (h *Handler) userAction(action string) http.HandlerFunc {
 		case "send-password-reset":
 			opErr = h.svc.SendPasswordReset(r.Context(), sess.AdminID, id)
 		case "request-deletion":
-			if reason == "" {
-				reason = "deletion requested by admin"
+			// 二次确认: the typed word guards the semi-destructive action.
+			if r.PostFormValue("confirm") != "删除" {
+				opErr = errDeletionConfirmRequired
+			} else {
+				if reason == "" {
+					reason = "deletion requested by admin"
+				}
+				opErr = h.svc.RequestDeletion(r.Context(), sess.AdminID, id, reason)
 			}
-			opErr = h.svc.RequestDeletion(r.Context(), sess.AdminID, id, reason)
 		case "cancel-deletion":
 			opErr = h.svc.CancelDeletion(r.Context(), sess.AdminID, id, reason)
 		}
 		if opErr != nil {
-			if errors.Is(opErr, errConfirmRequired) {
+			if errors.Is(opErr, errConfirmRequired) || errors.Is(opErr, errDeletionConfirmRequired) {
 				h.render(w, http.StatusBadRequest, "error.html", page{
 					Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
 					Error: opErr.Error()})
@@ -373,6 +393,12 @@ func (h *Handler) userAction(action string) http.HandlerFunc {
 				h.render(w, http.StatusServiceUnavailable, "error.html", page{
 					Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
 					Error: "服务器未配置 SMTP，无法发送邮件（操作未执行）"})
+				return
+			}
+			if errors.Is(opErr, errMailCooldown) {
+				h.render(w, http.StatusTooManyRequests, "error.html", page{
+					Title: "操作被冷却限制", Admin: true, CSRF: sess.CSRFToken,
+					Error: "邮件冷却期内（与用户自助路径共用同一冷却），请稍后重试"})
 				return
 			}
 			slog.Error("admin user action failed", "action", action,
@@ -431,6 +457,12 @@ var errConfirmRequired = &confirmError{}
 type confirmError struct{}
 
 func (*confirmError) Error() string { return "删除账号需要在确认框输入 DELETE" }
+
+var errDeletionConfirmRequired = &deletionConfirmError{}
+
+type deletionConfirmError struct{}
+
+func (*deletionConfirmError) Error() string { return "启动删除需要在确认框输入 删除" }
 
 // --- Invitations -----------------------------------------------------------------------
 

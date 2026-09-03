@@ -33,7 +33,7 @@
 | `DEV_LOGIN_ENABLED` | 本地可 true | **false** | **false** | 生产校验拒绝 true |
 | `TRUSTED_PROXIES` | 空（直连） | 反代内网 CIDR | 反代内网 CIDR | 仅信任的代理可写 X-Forwarded-For |
 | `CORS_ORIGINS` | 空或本地 | 管理域（若跨域） | 按需 | iOS 原生流量不需要 CORS |
-| `ADMIN_LISTEN_ADDR` | 127.0.0.1:8081 | 内网地址 | **127.0.0.1**（经代理+白名单暴露） | 生产校验要求 loopback |
+| `ADMIN_LISTEN_ADDR` | 127.0.0.1:8081 | 容器内 0.0.0.0（配 opt-in） | **loopback 或私网地址**；容器 wildcard 需 `ADMIN_ALLOW_WILDCARD_BIND=true` 显式确认，公网 IP 一律拒绝 |
 | `AASA_TEAM_ID` | 空 | 真实 10 位 Team ID | **真实 10 位 Team ID** | 未配置时 AASA 输出空列表并在日志警告，**不编造** |
 | `APPLE_BUNDLE_ID` | com.livetranslate.ios | 同左 | 同左 | 与 iOS 工程 PRODUCT_BUNDLE_IDENTIFIER 一致 |
 | `TOMBSTONE_RETENTION_DAYS` | 180 | 180 | 180 | 墓碑/变更日志保留期 |
@@ -46,7 +46,7 @@
 
 ## 生产启动校验（APP_ENV=production 时自动执行）
 
-以下任一情况都会让进程**启动失败**并列出全部问题：
+以下任一情况都会让进程**启动失败**并列出全部问题（容器内 API 监听 0.0.0.0 本身合法——是否暴露公网由 Compose 端口映射/反向代理/防火墙决定）：
 
 1. `JWT_SECRET` 为空 / 占位符（REPLACE_WITH…、CHANGEME、example.com 等） / 短于 32 字符。
 2. `DATABASE_URL` 缺失或占位。
@@ -54,8 +54,7 @@
 4. `MAILPIT_BASE_URL` 非空（开发捕获通道不得存在于生产）。
 5. `PUBLIC_BASE_URL` 缺失或非 HTTPS origin（密码重置链接将无处可指）。
 6. `SMTP_HOST` / `SMTP_FROM` 缺失，或 `SMTP_TLS_MODE=none`（生产必须真实发信通道）。
-7. `LISTEN_ADDR` 全网卡绑定且既无 TRUSTED_PROXIES 也无 CORS（疑似直接暴露公网）。
-8. `ADMIN_LISTEN_ADDR` 非 loopback（管理面必须经带访问控制的代理暴露）。
+7. `ADMIN_LISTEN_ADDR` 非 loopback/私网地址，或容器 wildcard 绑定未显式设置 `ADMIN_ALLOW_WILDCARD_BIND=true`（管理面必须经带访问控制的代理暴露；公网 IP 一律拒绝）。
 
 ## Universal Link / AASA 配置入口（部署时填写）
 

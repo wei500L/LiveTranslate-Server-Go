@@ -174,10 +174,21 @@ func (s *Service) SuspendUser(ctx context.Context, adminID, userID uuid.UUID, re
 	return err
 }
 
-// ReactivateUser restores status='active' (only from suspended).
+// ReactivateUser restores status='active' — ONLY from 'suspended'. A
+// pending (unverified) user must verify their email (this path activating
+// them would bypass verification); a pending_deletion user must go through
+// CancelDeletion (which records the distinct audit action). Any other
+// transition is refused with ErrNotFound rather than silently coerced.
 func (s *Service) ReactivateUser(ctx context.Context, adminID, userID uuid.UUID, reason string) error {
 	return s.db.Tx(ctx, func(tx pgx.Tx) error {
 		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		if u.Status != "suspended" {
+			return store.ErrNotFound
+		}
 		if err := store.UpdateUserStatus(ctx, q, userID, "active"); err != nil {
 			return err
 		}
@@ -209,8 +220,23 @@ func (s *Service) RevokeUserDevice(ctx context.Context, adminID, userID, deviceI
 }
 
 // ResendVerification re-issues the email-verification code for a pending
-// user (admin escalation path; bypasses the user-driven cooldown).
+// user (admin escalation path). The user-side resend cooldown applies here
+// too — an admin hammering the button must not mail-bomb the address; the
+// cooldown is the single rate rule for both paths.
 func (s *Service) ResendVerification(ctx context.Context, adminID, userID uuid.UUID) error {
+	q := s.db.Q()
+	u, err := store.GetUserByID(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if u.Status != "pending" || u.DeletedAt != nil {
+		return store.ErrNotFound
+	}
+	if ch, err := store.LatestLiveChallenge(ctx, q, userID, "verify_email"); err == nil && ch != nil {
+		if time.Since(ch.CreatedAt) < s.cfg.ResendCooldown {
+			return errMailCooldown
+		}
+	}
 	ok, err := s.auth.IssueVerificationForUser(ctx, userID)
 	if err != nil {
 		return err
@@ -221,8 +247,27 @@ func (s *Service) ResendVerification(ctx context.Context, adminID, userID uuid.U
 	return s.auditAdmin(ctx, adminID, audit.ActionAdminResendVerify, &userID, "")
 }
 
-// SendPasswordReset mails a fresh reset link for the user.
+// SendPasswordReset mails a fresh reset link for the user. The same
+// per-user cooldown as the self-service flow applies (a new reset
+// invalidates nothing, but unbounded admin-triggered mails are not
+// acceptable either).
 func (s *Service) SendPasswordReset(ctx context.Context, adminID, userID uuid.UUID) error {
+	q := s.db.Q()
+	u, err := store.GetUserByID(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if u.DeletedAt != nil || u.Status != "active" || u.EmailVerifiedAt == nil {
+		return store.ErrNotFound
+	}
+	var last time.Time
+	e := q.QueryRow(ctx, `
+		SELECT created_at FROM password_reset_tokens
+		WHERE user_id = $1 AND consumed_at IS NULL
+		ORDER BY created_at DESC LIMIT 1`, userID).Scan(&last)
+	if e == nil && time.Since(last) < s.cfg.ResendCooldown {
+		return errMailCooldown
+	}
 	ok, err := s.auth.IssuePasswordResetForUser(ctx, userID)
 	if err != nil {
 		return err
@@ -232,6 +277,10 @@ func (s *Service) SendPasswordReset(ctx context.Context, adminID, userID uuid.UU
 	}
 	return s.auditAdmin(ctx, adminID, audit.ActionAdminSendReset, &userID, "")
 }
+
+// errMailCooldown separates "the action was refused by the shared cooldown"
+// from genuine not-found errors so the handler can show the right message.
+var errMailCooldown = errors.New("resend cooldown active")
 
 // RequestDeletion schedules account deletion (pending_deletion + session
 // revocation + notice mail).

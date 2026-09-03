@@ -102,6 +102,17 @@ func ConsumeChallenge(ctx context.Context, q Q, id uuid.UUID) error {
 	return nil
 }
 
+// InvalidatePasswordResetToken consumes a reset token by ID WITHOUT using
+// it — the delivery-failure path calls this so a never-mailed token cannot
+// linger as valid, and the per-user resend cooldown no longer applies to a
+// token the user never received.
+func InvalidatePasswordResetToken(ctx context.Context, q Q, id uuid.UUID) error {
+	_, err := q.Exec(ctx, `
+		UPDATE password_reset_tokens SET consumed_at = now()
+		WHERE id = $1 AND consumed_at IS NULL`, id)
+	return err
+}
+
 // --- Login identities (bind/unbind, "sign-in methods") ----------------------
 
 type AuthIdentity struct {

@@ -1,15 +1,21 @@
 // Package importer performs the one-shot migration of a Python-service
 // SQLite database into the Go server's PostgreSQL schema.
 //
+// Source access goes through the mature, maintained pure-Go SQLite driver
+// (modernc.org/sqlite) opened in mode=ro — a SQLite-level read-only
+// boundary, not a hand-rolled file parser. WAL-mode sources are REFUSED
+// with instructions (a raw read of a live WAL database can miss committed
+// frames; checkpoint or copy the file first).
+//
 // Contract:
-//   - the source file is opened READ-ONLY (never written, never moved);
 //   - the default mode is a DRY RUN: nothing touches PostgreSQL;
-//   - --apply runs inside ONE transaction — any failure rolls everything
-//     back (safe re-run);
-//   - a non-empty target is refused unless --allow-non-empty;
+//   - --apply streams the source tables inside ONE transaction — any
+//     failure rolls everything back (safe re-run);
+//   - a non-empty target is refused unless --allow-non-empty (existing
+//     ids are then SKIPPED, the target row wins);
 //   - UUIDs, user relations, server_version, change_sequence, tombstones
 //     and the idempotency ledger are preserved verbatim;
-//   - sequences are reset to max(id) after the copy;
+//   - sequences are reset to max(id) inside the same transaction;
 //   - nothing resembling credentials is imported: the Python schema has no
 //     password columns, and no API keys / logs / model paths exist in it;
 //     users arrive with NO password (they sign in with Apple/dev as before,
@@ -20,17 +26,18 @@ package importer
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	_ "modernc.org/sqlite" // registers the database/sql "sqlite" driver
 
 	"livetranslate/server/db"
-	"livetranslate/server/internal/sqlitereader"
 	"livetranslate/server/internal/store"
 )
 
@@ -50,6 +57,7 @@ type Report struct {
 	StartedAt      time.Time      `json:"startedAt"`
 	DurationMs     int64          `json:"durationMs"`
 	TableCounts    map[string]int `json:"tableCounts"`
+	SourceJournal  string         `json:"sourceJournalMode"`
 	TargetEmpty    bool           `json:"targetEmpty"`
 	Warnings       []string       `json:"warnings,omitempty"`
 	Applied        bool           `json:"applied"`
@@ -62,6 +70,15 @@ type Importer struct {
 }
 
 func New(opts Options) *Importer { return &Importer{opts: opts} }
+
+// importOrder — the Python Alembic 0001 schema, in copy order (users
+// first, children after, ledger last). checkSourceShape requires every
+// table to exist in the source.
+var importOrder = []string{
+	"users", "devices", "refresh_tokens", "classroom_sessions",
+	"transcript_entries", "bookmarks", "favorite_sessions",
+	"sync_changes", "processed_operations",
+}
 
 // Run executes the import (dry-run by default). The returned report is
 // always populated, regardless of dry-run or apply mode.
@@ -76,30 +93,18 @@ func (imp *Importer) Run(ctx context.Context) (*Report, error) {
 		report.DurationMs = time.Since(report.StartedAt).Milliseconds()
 	}()
 
-	// --- Source (read-only) ---------------------------------------------------
-	src, err := sqlitereader.Open(imp.opts.SourcePath)
+	// --- Source (SQLite, read-only at the driver level) -------------------
+	src, err := openSource(imp.opts.SourcePath)
 	if err != nil {
-		return report, fmt.Errorf("open sqlite source: %w", err)
+		return report, err
 	}
-	missingExpected := []string{}
-	for _, t := range requiredTables {
-		if !src.HasTable(t) {
-			missingExpected = append(missingExpected, t)
-		}
-	}
-	if len(missingExpected) > 0 {
-		return report, fmt.Errorf("source is missing expected tables: %s (is this a LiveTranslate Python database?)",
-			strings.Join(missingExpected, ", "))
-	}
-	for _, t := range importOrder {
-		rows, err := src.ReadTable(t)
-		if err != nil {
-			return report, fmt.Errorf("read table %s: %w", t, err)
-		}
-		report.TableCounts[t] = len(rows)
+	defer src.Close()
+
+	if err := checkSourceShape(ctx, src, report); err != nil {
+		return report, err
 	}
 
-	// --- Target (migrate schema if needed, then emptiness check) ---------------
+	// --- Target (migrate schema if needed, then emptiness check) ----------
 	if imp.opts.Apply {
 		if err := db.Migrate(imp.opts.TargetDSN); err != nil {
 			return report, fmt.Errorf("target migrations: %w", err)
@@ -117,7 +122,7 @@ func (imp *Importer) Run(ctx context.Context) (*Report, error) {
 		if !empty && !imp.opts.AllowNonEmpty {
 			st.Close()
 			return report, fmt.Errorf(
-				"target database is not empty (existing users/sessions found); re-run with --allow-non-empty to merge into it — every UUID conflict still aborts the import")
+				"target database is not empty (existing users/sessions found); re-run with --allow-non-empty to merge into it — rows whose id already exists in the target are then skipped (the target wins)")
 		}
 		if err := imp.applyAll(ctx, st, src, report); err != nil {
 			st.Close()
@@ -138,19 +143,67 @@ func (imp *Importer) Run(ctx context.Context) (*Report, error) {
 	return report, nil
 }
 
-// requiredTables — the Python Alembic 0001 schema.
-var requiredTables = []string{
-	"users", "devices", "refresh_tokens", "classroom_sessions",
-	"transcript_entries", "bookmarks", "favorite_sessions",
-	"sync_changes", "processed_operations",
+// openSource opens the SQLite file through the pure-Go driver in READ-ONLY
+// mode: SQLite itself refuses every write on this connection — a real
+// boundary, not a convention. WAL-mode databases are refused (see checkSourceShape).
+func openSource(path string) (*sql.DB, error) {
+	if fi, err := os.Stat(path); err != nil {
+		return nil, err
+	} else if fi.IsDir() {
+		return nil, fmt.Errorf("source is a directory, not a database file")
+	}
+	uri := (&url.URL{Scheme: "file", Path: path}).String() + "?mode=ro"
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite source: %w", err)
+	}
+	// One connection: the source is only streamed once; a pool would just
+	// hold extra read handles.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open sqlite source: %w", err)
+	}
+	return db, nil
 }
 
-// importOrder respects FK-style relationships (users first, children after;
-// processed_operations last).
-var importOrder = []string{
-	"users", "devices", "refresh_tokens", "classroom_sessions",
-	"transcript_entries", "bookmarks", "favorite_sessions",
-	"sync_changes", "processed_operations",
+// checkSourceShape validates that the source is the expected schema and
+// records its journal mode. WAL is refused: a read-only connection to a
+// live WAL database may read a stale snapshot (and needs the -shm/-wal
+// sidecars); the operator must checkpoint or copy the file first.
+func checkSourceShape(ctx context.Context, src *sql.DB, report *Report) error {
+	var journal string
+	if err := src.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journal); err != nil {
+		return fmt.Errorf("read journal mode: %w", err)
+	}
+	report.SourceJournal = strings.ToLower(strings.TrimSpace(journal))
+	if report.SourceJournal == "wal" {
+		return fmt.Errorf(
+			"source database is in WAL mode: stop the source service (or run `sqlite3 <db> 'PRAGMA wal_checkpoint(TRUNCATE);'` and copy the file) so all committed data is in the main file, then re-run")
+	}
+	missing := []string{}
+	for _, t := range importOrder {
+		var n int
+		if err := src.QueryRowContext(ctx,
+			`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, t,
+		).Scan(&n); err != nil {
+			return fmt.Errorf("inspect table %s: %w", t, err)
+		}
+		if n == 0 {
+			missing = append(missing, t)
+			report.TableCounts[t] = 0
+			continue
+		}
+		if err := src.QueryRowContext(ctx, "SELECT count(*) FROM "+t).Scan(&report.TableCounts[t]); err != nil {
+			return fmt.Errorf("count table %s: %w", t, err)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("source is missing expected tables: %s (is this a LiveTranslate Python database?)",
+			strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func targetEmpty(ctx context.Context, st *store.DB) (bool, error) {
@@ -166,17 +219,16 @@ func targetEmpty(ctx context.Context, st *store.DB) (bool, error) {
 
 // applyAll copies every table inside ONE transaction; sequences are reset
 // inside the same transaction, so the final state is consistent or absent.
-func (imp *Importer) applyAll(ctx context.Context, st *store.DB, src *sqlitereader.DB, report *Report) error {
+// Source rows are STREAMED (rows.Next()) — never fully materialized.
+func (imp *Importer) applyAll(ctx context.Context, st *store.DB, src *sql.DB, report *Report) error {
 	return st.Tx(ctx, func(tx pgx.Tx) error {
 		q := store.TxQ(tx)
 		for _, table := range importOrder {
-			rows, err := src.ReadTable(table)
+			copied, err := copyTable(ctx, q, src, table)
 			if err != nil {
-				return fmt.Errorf("read %s: %w", table, err)
-			}
-			if err := copyTable(ctx, q, table, rows, report); err != nil {
 				return fmt.Errorf("copy %s: %w", table, err)
 			}
+			report.TableCounts[table] = copied
 		}
 		// Reset the sequences the BIGSERIAL columns feed, so new inserts do
 		// not collide with imported ids.
@@ -193,99 +245,6 @@ func (imp *Importer) applyAll(ctx context.Context, st *store.DB, src *sqliteread
 		report.SequencesReset = []string{"sync_changes_change_sequence_seq", "processed_operations_id_seq"}
 		return nil
 	})
-}
-
-// normalizeUUID accepts both the dashed 36-char form (PostgreSQL) and the
-// 32-hex form SQLAlchemy's Uuid type writes on SQLite.
-func normalizeUUID(raw string) (uuid.UUID, error) {
-	raw = strings.TrimSpace(strings.ToLower(raw))
-	switch len(raw) {
-	case 36:
-		return uuid.Parse(raw)
-	case 32:
-		dashed := raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
-		return uuid.Parse(dashed)
-	default:
-		return uuid.Nil, fmt.Errorf("not a UUID column value: %q", raw)
-	}
-}
-
-func rowUUID(row sqlitereader.Row, col string) (uuid.UUID, error) {
-	v, ok := row.Col(col)
-	if !ok || v.IsNull() {
-		return uuid.Nil, fmt.Errorf("missing required column %s", col)
-	}
-	return normalizeUUID(v.AsString())
-}
-
-func rowTimePtr(row sqlitereader.Row, col string) (*time.Time, error) {
-	v, ok := row.Col(col)
-	if !ok || v.IsNull() {
-		return nil, nil
-	}
-	t, err := v.AsTime()
-	if err != nil {
-		return nil, fmt.Errorf("column %s: %w", col, err)
-	}
-	return &t, nil
-}
-
-func rowTime(row sqlitereader.Row, col string) (time.Time, error) {
-	t, err := rowTimePtr(row, col)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if t == nil {
-		return time.Time{}, fmt.Errorf("column %s: required timestamp is NULL", col)
-	}
-	return *t, nil
-}
-
-func rowString(row sqlitereader.Row, col string) string {
-	v, ok := row.Col(col)
-	if !ok || v.IsNull() {
-		return ""
-	}
-	return v.AsString()
-}
-
-func rowIntPtr(row sqlitereader.Row, col string) (*int, error) {
-	v, ok := row.Col(col)
-	if !ok || v.IsNull() {
-		return nil, nil
-	}
-	n, err := v.AsInt()
-	if err != nil {
-		return nil, fmt.Errorf("column %s: %w", col, err)
-	}
-	ni := int(n)
-	return &ni, nil
-}
-
-func rowInt(row sqlitereader.Row, col string, fallback int) (int, error) {
-	p, err := rowIntPtr(row, col)
-	if err != nil {
-		return 0, err
-	}
-	if p == nil {
-		return fallback, nil
-	}
-	return *p, nil
-}
-
-func rowFloat(row sqlitereader.Row, col string, fallback float64) (float64, error) {
-	v, ok := row.Col(col)
-	if !ok || v.IsNull() {
-		return fallback, nil
-	}
-	switch v.Type {
-	case sqlitereader.TypeReal:
-		return v.Real, nil
-	case sqlitereader.TypeInt:
-		return float64(v.Int), nil
-	default:
-		return 0, fmt.Errorf("column %s: not numeric", col)
-	}
 }
 
 func writeReport(path string, report *Report) error {

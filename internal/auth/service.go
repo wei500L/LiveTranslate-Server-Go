@@ -193,6 +193,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 
 	created := false
 	var plainCode string
+	var challengeID uuid.UUID
 	err = s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		// Existing ACTIVE user with this email → enumeration-safe refusal.
@@ -219,7 +220,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 			if err != nil {
 				return err
 			}
-			plainCode, err = s.createChallengeTx(ctx, q, existing.ID)
+			plainCode, challengeID, err = s.createChallengeTx(ctx, q, existing.ID)
 			return err
 		}
 		// Invitation gate.
@@ -244,7 +245,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 			return err
 		}
 		var cerr error
-		plainCode, cerr = s.createChallengeTx(ctx, q, u.ID)
+		plainCode, challengeID, cerr = s.createChallengeTx(ctx, q, u.ID)
 		if cerr != nil {
 			return cerr
 		}
@@ -256,10 +257,10 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 	if err != nil {
 		return nil, err
 	}
-	// Delivery outside the transaction: a transport failure must not roll
-	// back the challenge — the user can hit resend after the cooldown.
+	// Delivery outside the transaction: a transport failure invalidates the
+	// challenge (see sendCodeEmail) so resend is not cooldown-blocked.
 	if plainCode != "" {
-		s.sendCodeEmail(ctx, email, plainCode)
+		s.sendCodeEmail(ctx, email, plainCode, challengeID)
 	}
 	return &LoginResponse{EmailVerified: false, IsNewUser: created}, nil
 }
@@ -274,25 +275,28 @@ func domainOf(email string) string {
 // createChallengeTx invalidates prior codes and inserts a fresh one,
 // returning the PLAINTEXT code so the caller can mail it after commit.
 // Storage sees only the hash.
-func (s *Service) createChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID) (string, error) {
+func (s *Service) createChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID) (string, uuid.UUID, error) {
 	return s.createTargetedChallengeTx(ctx, q, userID, "verify_email", nil)
 }
 
 // createTargetedChallengeTx is the general form: purpose + optional target
 // email (used by the email-change flow, where the code alone is not enough
 // — the challenge row must name the address being verified).
-func (s *Service) createTargetedChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID, purpose string, targetEmail *string) (string, error) {
+func (s *Service) createTargetedChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID, purpose string, targetEmail *string) (code string, challengeID uuid.UUID, err error) {
 	if err := store.InvalidatePendingChallenges(ctx, q, userID, purpose); err != nil {
-		return "", err
+		return "", uuid.Nil, err
 	}
-	code := token.NewEmailCode()
+	code = token.NewEmailCode()
 	ch := &store.EmailChallenge{
 		ID: uuid.New(), UserID: userID, Purpose: purpose,
 		TargetEmail: targetEmail,
 		TokenHash:   token.HashToken(code),
 		ExpiresAt:   time.Now().Add(s.cfg.EmailVerifyTTL),
 	}
-	return code, store.CreateEmailChallenge(ctx, q, ch)
+	if err := store.CreateEmailChallenge(ctx, q, ch); err != nil {
+		return "", uuid.Nil, err
+	}
+	return code, ch.ID, nil
 }
 
 // sendCodeEmail delivers a verification code. Failures are logged, never
@@ -313,19 +317,22 @@ func (s *Service) sendCodeEmail(ctx context.Context, email, plain string) {
 	}
 }
 
-// sendEmailChangeCode delivers the code that verifies a NEW login email.
-func (s *Service) sendEmailChangeCode(ctx context.Context, newEmail, oldEmail, plain string) {
+// sendEmailChangeCode delivers the code that verifies a NEW login email;
+// delivery failure invalidates the challenge (see sendCodeEmail).
+func (s *Service) sendEmailChangeCode(ctx context.Context, newEmail, oldEmail, plain string, challengeID uuid.UUID) {
 	msg, err := mail.Render(mail.TemplateEmailChange, &mail.TemplateData{
 		Code: plain, OldEmail: oldEmail,
 		VerifyMinutes: int(s.cfg.EmailVerifyTTL.Minutes()),
 	})
 	if err != nil {
 		s.log.Error("email-change mail render failed", "err", err.Error())
+		_ = store.ConsumeChallenge(ctx, s.db.Q(), challengeID)
 		return
 	}
 	msg.To = newEmail
 	if err := s.mailer.Send(ctx, msg); err != nil {
 		s.log.Error("email-change code delivery failed", "err", err.Error())
+		_ = store.ConsumeChallenge(ctx, s.db.Q(), challengeID)
 	}
 }
 
@@ -398,6 +405,7 @@ func (s *Service) issueAndSendVerification(ctx context.Context, email string, ip
 		return ErrNoMailTransport
 	}
 	var plain string
+	var challengeID uuid.UUID
 	err := s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		u, err := store.GetUserByNormalizedEmail(ctx, q, email)
@@ -414,14 +422,14 @@ func (s *Service) issueAndSendVerification(ctx context.Context, email string, ip
 			}
 		}
 		var cerr error
-		plain, cerr = s.createChallengeTx(ctx, q, u.ID)
+		plain, challengeID, cerr = s.createChallengeTx(ctx, q, u.ID)
 		return cerr
 	})
 	if err != nil {
 		return err
 	}
 	if plain != "" {
-		s.sendCodeEmail(ctx, email, plain)
+		s.sendCodeEmail(ctx, email, plain, challengeID)
 	}
 	return nil
 }
@@ -758,6 +766,7 @@ func (s *Service) ForgotPassword(ctx context.Context, rawEmail, ip string) error
 		return nil
 	}
 	plain := ""
+	tokenID := uuid.Nil
 	err := s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		u, err := store.GetUserByNormalizedEmail(ctx, q, email)
@@ -781,13 +790,14 @@ func (s *Service) ForgotPassword(ctx context.Context, rawEmail, ip string) error
 			ID: uuid.New(), UserID: u.ID, TokenHash: token.HashToken(plain),
 			ExpiresAt: time.Now().Add(s.cfg.PasswordResetTTL),
 		}
+		tokenID = t.ID
 		return store.CreatePasswordResetToken(ctx, q, t)
 	})
 	if err != nil {
 		return err
 	}
 	if plain != "" {
-		s.sendResetEmail(ctx, email, plain)
+		s.sendResetEmail(ctx, email, plain, tokenID)
 	}
 	return nil
 }
@@ -1166,6 +1176,7 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, curr
 
 	state := &EmailChangeState{}
 	var plain string
+	var challengeID uuid.UUID
 	err = s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		// Availability re-check INSIDE the transaction (the unique partial
@@ -1184,13 +1195,12 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, curr
 			}
 		}
 		target := newEmail
-		plain, err = s.createTargetedChallengeTx(ctx, q, userID, "change_email", &target)
-		if err != nil {
-			return err
+		var cerr error
+		plain, challengeID, cerr = s.createTargetedChallengeTx(ctx, q, userID, "change_email", &target)
+		if cerr != nil {
+			return cerr
 		}
-		if ch, err := store.LatestLiveChallenge(ctx, q, userID, "change_email"); err == nil && ch != nil {
-			state.TargetEmail, state.CreatedAt, state.ExpiresAt = newEmail, ch.CreatedAt, ch.ExpiresAt
-		}
+		state.TargetEmail, state.ExpiresAt = newEmail, time.Now().Add(s.cfg.EmailVerifyTTL)
 		uid := userID
 		return s.audit.Record(ctx, q, "user", &uid, audit.ActionEmailChangeStart, &uid, "", HashPII(ip), nil,
 			map[string]string{"email_domain": domainOf(newEmail)})
@@ -1199,7 +1209,7 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, curr
 		return nil, err
 	}
 	if plain != "" {
-		s.sendEmailChangeCode(ctx, newEmail, deref(u.NormalizedEmail), plain)
+		s.sendEmailChangeCode(ctx, newEmail, deref(u.NormalizedEmail), plain, challengeID)
 	}
 	return state, nil
 }
@@ -1419,6 +1429,7 @@ func (s *Service) IssueVerificationForUser(ctx context.Context, userID uuid.UUID
 		return false, ErrNoMailTransport
 	}
 	var plain, email string
+	var challengeID uuid.UUID
 	err := s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		u, err := store.GetUserByID(ctx, q, userID)
@@ -1429,14 +1440,14 @@ func (s *Service) IssueVerificationForUser(ctx context.Context, userID uuid.UUID
 			return store.ErrNotFound
 		}
 		email = *u.Email
-		plain, err = s.createChallengeTx(ctx, q, userID)
+		plain, challengeID, err = s.createChallengeTx(ctx, q, userID)
 		return err
 	})
 	if err != nil {
 		return false, err
 	}
 	if plain != "" {
-		s.sendCodeEmail(ctx, email, plain)
+		s.sendCodeEmail(ctx, email, plain, challengeID)
 	}
 	return true, nil
 }
@@ -1449,6 +1460,7 @@ func (s *Service) IssuePasswordResetForUser(ctx context.Context, userID uuid.UUI
 		return false, ErrNoMailTransport
 	}
 	var plain, email string
+	tokenID := uuid.Nil
 	err := s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		u, err := store.GetUserByID(ctx, q, userID)
@@ -1464,13 +1476,14 @@ func (s *Service) IssuePasswordResetForUser(ctx context.Context, userID uuid.UUI
 			ID: uuid.New(), UserID: userID, TokenHash: token.HashToken(plain),
 			ExpiresAt: time.Now().Add(s.cfg.PasswordResetTTL),
 		}
+		tokenID = t.ID
 		return store.CreatePasswordResetToken(ctx, q, t)
 	})
 	if err != nil {
 		return false, err
 	}
 	if plain != "" {
-		s.sendResetEmail(ctx, email, plain)
+		s.sendResetEmail(ctx, email, plain, tokenID)
 	}
 	return true, nil
 }

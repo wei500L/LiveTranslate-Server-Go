@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -48,6 +49,11 @@ func isPlaceholder(v string) bool {
 // ValidateProduction enforces the production boot contract statically (no
 // network, no DB). It returns every violation so operators see the full
 // list at once instead of fixing them one boot at a time.
+//
+// Container topology is LEGAL: the API may bind 0.0.0.0 inside the
+// container — whether it is reachable from the internet is decided by the
+// Compose port mappings / reverse proxy / firewall, not by the bind. What
+// this validation constrains is the surfaces that must not be public.
 func (c *Config) ValidateProduction() error {
 	if c.AppEnv != EnvProduction {
 		return nil
@@ -79,24 +85,45 @@ func (c *Config) ValidateProduction() error {
 	if c.SMTPTLSMode == SMTPPlainNone {
 		problems = append(problems, "SMTP_TLS_MODE=none is not allowed in production")
 	}
-	if strings.HasPrefix(c.ListenAddr, "0.0.0.0") || strings.HasPrefix(c.ListenAddr, ":") {
-		// Binding wide is fine behind a local reverse proxy inside the
-		// container/host network; the API itself must still not be
-		// published directly. Compose maps the port explicitly, so a wide
-		// bind is only flagged when TRUSTED_PROXIES is unset — that
-		// combination means "publicly reachable AND no proxy awareness".
-		if len(c.TrustedProxies) == 0 && len(c.CORSOrigins) == 0 {
-			problems = append(problems, "LISTEN_ADDR binds all interfaces with no TRUSTED_PROXIES/CORS — expose via a reverse proxy instead")
-		}
-	}
-	if c.AdminListenAddr != "" && !strings.HasPrefix(c.AdminListenAddr, "127.0.0.1") {
-		// The admin UI has no public-facing auth surface by design; keep it
-		// loopback-bound (front it with an access-controlled proxy when
-		// remote access is needed).
-		problems = append(problems, "ADMIN_LISTEN_ADDR should stay on 127.0.0.1 (proxy with an IP allowlist for remote access)")
+	if err := validateAdminBind(c.AdminListenAddr, c.AdminAllowWildcardBind); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("production configuration rejected:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// validateAdminBind constrains the admin listener: loopback, a
+// private/RFC1918 address (a controlled internal network), or an explicit
+// wildcard opt-in for containerized deployments whose port mapping is NOT
+// public (the operator asserts that with ADMIN_ALLOW_WILDCARD_BIND=true).
+// A wildcard bind without the opt-in — or a bind to a specific PUBLIC
+// address — is refused: the admin surface has no public-facing auth design.
+func validateAdminBind(addr string, allowWildcard bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("ADMIN_LISTEN_ADDR %q is not host:port", addr)
+	}
+	if host == "" {
+		// ":8081" binds all interfaces — same rule as 0.0.0.0.
+		if !allowWildcard {
+			return fmt.Errorf("ADMIN_LISTEN_ADDR binds all interfaces; in production bind 127.0.0.1 or a private address, or set ADMIN_ALLOW_WILDCARD_BIND=true when the port is only reachable on a controlled internal network")
+		}
+		return nil
+	}
+	ip := net.ParseIP(host)
+	switch {
+	case ip == nil:
+		return fmt.Errorf("ADMIN_LISTEN_ADDR host %q is not an IP address", host)
+	case ip.IsLoopback():
+		return nil
+	case ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified():
+		if ip.IsUnspecified() && !allowWildcard {
+			return fmt.Errorf("ADMIN_LISTEN_ADDR binds all interfaces; in production bind 127.0.0.1 or a private address, or set ADMIN_ALLOW_WILDCARD_BIND=true when the port is only reachable on a controlled internal network")
+		}
+		return nil
+	default:
+		return fmt.Errorf("ADMIN_LISTEN_ADDR must be loopback or a private address in production (got %s)", host)
+	}
 }

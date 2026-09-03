@@ -17,13 +17,19 @@ p.sub { margin:0 0 20px; color:var(--muted); font-size:13px; }
 .badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:12px; margin-bottom:14px; }
 .badge.valid   { background:#e3f3ea; color:var(--ok); }
 .badge.expired { background:#fdf3e0; color:var(--warn); }
-.badge.used     { background:#eceff3; color:var(--muted); }
+.badge.used    { background:#eceff3; color:var(--muted); }
 .badge.invalid { background:#fbe6e2; color:var(--danger); }
-a.btn, a.btn:visited { display:block; background:var(--brand); color:#fff; text-decoration:none;
-        text-align:center; border-radius:8px; padding:13px 18px; font-weight:600; font-size:15px; }
+.badge.ratelimited { background:#fbe6e2; color:var(--danger); }
 code.token { display:block; font-family:ui-monospace,Menlo,monospace; font-size:12px; word-break:break-all;
         background:#eef1f6; border-radius:6px; padding:10px 12px; margin:14px 0; user-select:all; }
 p.note { font-size:12px; color:var(--muted); margin:14px 0 0; }
+form.resend { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }
+form.resend h2 { font-size:14px; margin:0 0 6px; }
+form.resend p.hint { font-size:12px; color:var(--muted); margin:0 0 10px; }
+form.resend .row { display:flex; gap:8px; }
+form.resend input[type=email] { flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+form.resend button { background:transparent; color:var(--brand); border:1px solid var(--brand);
+        border-radius:8px; padding:10px 16px; font:inherit; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -33,25 +39,40 @@ p.note { font-size:12px; color:var(--muted); margin:14px 0 0; }
 
   {{if eq .State "valid"}}
     <span class="badge valid">链接有效</span>
-    <p>在安装了 LiveTranslate 的 iPhone 上点击下方按钮继续重置。如果你正在手机上浏览本页，按钮会直接打开 App 的重置页面。</p>
-    <a class="btn" href="{{.SchemeLink}}">在 App 中打开重置页面 / Open in app</a>
-    <p class="note">没有安装 App？先在 App Store 安装 LiveTranslate，然后重新打开邮件中的链接。</p>
-    <p class="note">也可以手动复制下面的凭证，在 App 的「找回密码」页粘贴：</p>
+    <p>如果这台 iPhone 上安装了 LiveTranslate，直接点开邮件中的链接即可进入 App 的重置页面（无需此网页）。</p>
+    <p>没有安装 App，或想在 App 中手动继续？复制下面的一次性凭证，在 App 的「登录 · 忘记密码」第二步粘贴：</p>
     <code class="token">{{.Token}}</code>
+    <p class="note">凭证只能使用一次，且会过期。请勿转发给他人。This page loads no third-party scripts.</p>
   {{else if eq .State "expired"}}
     <span class="badge expired">链接已过期</span>
-    <p>这封重置邮件已超过有效期。请在 App 的「登录 · 忘记密码」中重新发起重置，我们会发送一封新的邮件。</p>
+    <p>这封重置邮件已超过有效期。请通过下方入口重新发送，或在 App 的「登录 · 忘记密码」中重新发起。</p>
     <p class="note">为安全起见，链接有效期较短且只能使用一次。如果你并未请求重置，无需任何操作。</p>
   {{else if eq .State "used"}}
     <span class="badge used">链接已使用</span>
-    <p>该重置链接已被使用过。如果你刚刚完成了重置，请直接用新密码登录；如果不是你操作的，请立即通过「忘记密码」重新设置密码。</p>
+    <p>该重置链接已被使用过。如果你刚刚完成了重置，请直接用新密码登录；如果不是你操作的，请立即重新设置密码。</p>
+  {{else if eq .State "ratelimited"}}
+    <span class="badge ratelimited">请求过于频繁</span>
+    <p>操作过于频繁，请稍后再试。</p>
+  {{else if eq .State "resent"}}
+    <span class="badge valid">已受理</span>
+    <p>如果该邮箱已注册，你将收到一封新的重置邮件。为保护账号安全，无论邮箱是否存在，这里显示的内容都相同。</p>
+    <p class="note">请查收新邮件；旧邮件中的链接会被新链接取代。</p>
   {{else}}
     <span class="badge invalid">链接无效</span>
     <p>这个链接不正确或已失效。请从最新的重置邮件中重新打开链接；旧邮件中的链接会被新链接取代。</p>
     <p class="note">如果你并未请求重置，无需任何操作，你的密码不会改变。</p>
   {{end}}
 
-  <p class="note">本页面不包含任何第三方统计或追踪脚本。This page loads no third-party scripts.</p>
+  {{if not (eq .State "resent")}}
+  <form class="resend" method="post" action="/reset-password/resend">
+    <h2>重新发送重置邮件</h2>
+    <p class="hint">输入注册邮箱。无论邮箱是否存在，页面提示都相同（防探测）。</p>
+    <div class="row">
+      <input type="email" name="email" placeholder="you@example.com" maxlength="320" required>
+      <button type="submit">发送</button>
+    </div>
+  </form>
+  {{end}}
 </div>
 </body>
 </html>

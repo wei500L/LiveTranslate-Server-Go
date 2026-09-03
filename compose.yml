@@ -74,6 +74,11 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-livetranslate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-livetranslate}
       ADMIN_LISTEN_ADDR: 0.0.0.0:8081
+      # In-container wildcard bind with the host port mapped to loopback
+      # only (see ports below). APP_ENV=production additionally requires
+      # this explicit opt-in for the wildcard bind.
+      ADMIN_ALLOW_WILDCARD_BIND: ${ADMIN_ALLOW_WILDCARD_BIND:-false}
+      APP_ENV: ${APP_ENV:-development}
       DEV_MODE: "false"
     ports:
       # Keep OFF the public internet in production; front with Caddy +

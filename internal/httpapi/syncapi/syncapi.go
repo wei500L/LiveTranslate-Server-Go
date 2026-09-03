@@ -12,6 +12,7 @@ import (
 	"livetranslate/server/internal/config"
 	"livetranslate/server/internal/httpapi"
 	authapi "livetranslate/server/internal/httpapi/auth"
+	"livetranslate/server/internal/metrics"
 	"livetranslate/server/internal/sync"
 )
 
@@ -58,6 +59,12 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	metrics.Inc(metrics.SyncPushBatches)
+	for i := range results {
+		if results[i].Status == "conflict" {
+			metrics.Inc(metrics.SyncPushConflicts)
+		}
+	}
 	httpapi.WriteJSON(w, http.StatusOK, sync.PushResponse{
 		SchemaVersion: h.cfg.SchemaVersion,
 		Results:       results,
@@ -88,6 +95,7 @@ func (h *Handler) pull(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	metrics.Inc(metrics.SyncPullRequests)
 	httpapi.WriteJSON(w, http.StatusOK, resp)
 }
 

@@ -697,6 +697,182 @@ func studyTaskRecordJSON(t *studyTaskRow) json.RawMessage {
 	return b
 }
 
+type courseScheduleRow struct {
+	id            uuid.UUID
+	userID        uuid.UUID
+	courseID      *uuid.UUID
+	weekday       int
+	startSecs     int
+	endSecs       int
+	recurrence    string
+	parityAnchor  *time.Time // DATE at UTC midnight
+	firstWeekOdd  bool
+	semesterStart time.Time
+	semesterEnd   time.Time
+	timezone      string
+	teacher       string
+	location      string
+	note          string
+	reminderMins  int
+	enabled       bool
+	onceDate      *time.Time
+	serverVer     int
+	createdAt     time.Time
+	updatedAt     time.Time
+	deletedAt     *time.Time
+}
+
+func fetchCourseSchedule(ctx context.Context, q store.Q, userID, id uuid.UUID) (*courseScheduleRow, error) {
+	s := &courseScheduleRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, course_id, weekday, start_secs, end_secs, recurrence,
+		       week_parity_anchor, first_week_is_odd, semester_start, semester_end,
+		       timezone, teacher_override, location_override, note,
+		       reminder_lead_mins, is_enabled, once_date,
+		       server_version, created_at, updated_at, deleted_at
+		FROM course_schedules WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&s.id, &s.userID, &s.courseID, &s.weekday, &s.startSecs, &s.endSecs, &s.recurrence,
+		&s.parityAnchor, &s.firstWeekOdd, &s.semesterStart, &s.semesterEnd,
+		&s.timezone, &s.teacher, &s.location, &s.note,
+		&s.reminderMins, &s.enabled, &s.onceDate,
+		&s.serverVer, &s.createdAt, &s.updatedAt, &s.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// dateString renders a DATE column (scanned as timestamptz-at-UTC-midnight)
+// as "YYYY-MM-DD" in UTC — the storage zone never leaked into the value.
+func dateString(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format("2006-01-02")
+}
+
+func scheduleRowView(s *courseScheduleRow) learningRowView {
+	if s == nil {
+		return learningRowView{}
+	}
+	return learningRowView{serverVer: s.serverVer, updatedAt: s.updatedAt}
+}
+
+func courseScheduleRecordJSON(s *courseScheduleRow) json.RawMessage {
+	var anchor, once *string
+	if s.parityAnchor != nil {
+		str := dateString(s.parityAnchor)
+		anchor = &str
+	}
+	if s.onceDate != nil {
+		str := dateString(s.onceDate)
+		once = &str
+	}
+	b, _ := json.Marshal(courseScheduleRecord{
+		EntityType: EntityCourseSchedule, ID: s.id.String(),
+		CourseID: optUUIDString(s.courseID),
+		Weekday:  s.weekday, StartSecs: s.startSecs, EndSecs: s.endSecs,
+		Recurrence:     s.recurrence,
+		ParityAnchor:   anchor,
+		FirstWeekIsOdd: s.firstWeekOdd,
+		SemesterStart:  dateString(&s.semesterStart),
+		SemesterEnd:    dateString(&s.semesterEnd),
+		Timezone:       s.timezone,
+		Teacher:        s.teacher, Location: s.location, Note: s.note,
+		ReminderMins: s.reminderMins, Enabled: s.enabled,
+		OnceDate:      once,
+		ServerVersion: s.serverVer, Deleted: s.deletedAt != nil,
+	})
+	return b
+}
+
+type scheduleExceptionRow struct {
+	id           uuid.UUID
+	userID       uuid.UUID
+	scheduleID   uuid.UUID
+	courseID     *uuid.UUID
+	originalDate *time.Time
+	kind         string
+	changedStart *int
+	changedEnd   *int
+	movedToDate  *time.Time
+	location     string
+	teacher      string
+	note         string
+	serverVer    int
+	createdAt    time.Time
+	updatedAt    time.Time
+	deletedAt    *time.Time
+}
+
+func fetchScheduleException(ctx context.Context, q store.Q, userID, id uuid.UUID) (*scheduleExceptionRow, error) {
+	e := &scheduleExceptionRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, schedule_id, course_id, original_date, exception_kind,
+		       changed_start, changed_end, moved_to_date,
+		       location_override, teacher_override, note,
+		       server_version, created_at, updated_at, deleted_at
+		FROM schedule_exceptions WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&e.id, &e.userID, &e.scheduleID, &e.courseID, &e.originalDate, &e.kind,
+		&e.changedStart, &e.changedEnd, &e.movedToDate,
+		&e.location, &e.teacher, &e.note,
+		&e.serverVer, &e.createdAt, &e.updatedAt, &e.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func exceptionRowView(e *scheduleExceptionRow) learningRowView {
+	if e == nil {
+		return learningRowView{}
+	}
+	return learningRowView{serverVer: e.serverVer, updatedAt: e.updatedAt}
+}
+
+func scheduleExceptionRecordJSON(e *scheduleExceptionRow) json.RawMessage {
+	var original, moved *string
+	if e.originalDate != nil {
+		str := dateString(e.originalDate)
+		original = &str
+	}
+	if e.movedToDate != nil {
+		str := dateString(e.movedToDate)
+		moved = &str
+	}
+	b, _ := json.Marshal(scheduleExceptionRecord{
+		EntityType: EntityScheduleException, ID: e.id.String(),
+		ScheduleID:    e.scheduleID.String(),
+		CourseID:      optUUIDString(e.courseID),
+		OriginalDate:  original,
+		ExceptionKind: e.kind,
+		ChangedStart:  e.changedStart, ChangedEnd: e.changedEnd,
+		MovedToDate: moved,
+		Location:    e.location, Teacher: e.teacher, Note: e.note,
+		ServerVersion: e.serverVer, Deleted: e.deletedAt != nil,
+	})
+	return b
+}
+
+// parseWireDate converts an incoming "YYYY-MM-DD" wire string into a DATE
+// column value (UTC midnight). Empty string = nil (no date).
+func parseWireDate(s string) (*time.Time, error) {
+	if s == "" {
+		return nil, nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date %q (want YYYY-MM-DD)", s)
+	}
+	return &t, nil
+}
+
 // optUUIDString renders a nullable UUID as an optional wire string (nil
 // pointer = key omitted = "no source / unscoped").
 func optUUIDString(u *uuid.UUID) *string {
@@ -880,6 +1056,10 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyStudyTask(ctx, q, userID, item)
 	case EntityTranscriptCorrection:
 		return s.applyCorrection(ctx, q, userID, item)
+	case EntityCourseSchedule:
+		return s.applyCourseSchedule(ctx, q, userID, item)
+	case EntityScheduleException:
+		return s.applyScheduleException(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -2017,6 +2197,12 @@ func (s *Service) applyCourse(ctx context.Context, q store.Q, userID uuid.UUID, 
 		// Learning material survives too — terms/cards/tasks keep their
 		// rows and schedule, only the course scoping reference is cleared.
 		if err := s.detachCourseFromStudyData(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
+		// Schedules, however, are meaningless without their course — they
+		// AND their exceptions are tombstoned. Sessions keep their
+		// occurrence_key (dangling by design).
+		if err := s.cascadeDeleteSchedulesForCourse(ctx, q, userID, item.EntityID); err != nil {
 			return nil, err
 		}
 		res := accepted(item, version, updatedAt)
@@ -3454,6 +3640,536 @@ func (s *Service) applyStudyTask(ctx context.Context, q store.Q, userID uuid.UUI
 	return res, nil
 }
 
+// applyScheduleRowDelete cancels the schedule's exceptions when the
+// schedule itself is deleted: deleting a course_schedule tombstones its
+// schedule_exceptions so a rule can never outlive its exceptions on
+// another device. Course deletion cascades schedules separately
+// (cascadeDeleteSchedulesForCourse).
+func (s *Service) cascadeDeleteExceptionsForSchedule(ctx context.Context, q store.Q, userID, scheduleID uuid.UUID) error {
+	rows, err := q.Query(ctx, `
+		UPDATE schedule_exceptions
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND schedule_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, scheduleID)
+	if err != nil {
+		return err
+	}
+	type bumped struct {
+		id uuid.UUID
+		v  int
+	}
+	var items []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range items {
+		if err := logChange(ctx, q, userID, EntityScheduleException, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cascadeDeleteSchedulesForCourse tombstones the course's schedules AND
+// their exceptions when a course is deleted. Sessions keep their
+// occurrence_key (historical attribution survives; the key simply dangles
+// — the client shows "来源日程已不存在").
+func (s *Service) cascadeDeleteSchedulesForCourse(ctx context.Context, q store.Q, userID, courseID uuid.UUID) error {
+	rows, err := q.Query(ctx, `
+		UPDATE course_schedules
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND course_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, courseID)
+	if err != nil {
+		return err
+	}
+	type bumped struct {
+		id uuid.UUID
+		v  int
+	}
+	var schedules []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		schedules = append(schedules, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range schedules {
+		if err := logChange(ctx, q, userID, EntityCourseSchedule, b.id, "delete", b.v); err != nil {
+			return err
+		}
+		if err := s.cascadeDeleteExceptionsForSchedule(ctx, q, userID, b.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyCourseSchedule: the recurring rule entity. Schema: recurrence must
+// be a known value; semester dates must parse. Merge: non-empty incoming
+// wins (the "rules" convention — a newer device's edit of a rule field
+// wins; the baseVersion matrix already gates stale devices). Delete
+// cascades exceptions.
+func (s *Service) applyCourseSchedule(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchCourseSchedule(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj != nil && obj.deletedAt == nil {
+			if err := s.cascadeDeleteExceptionsForSchedule(ctx, q, userID, item.EntityID); err != nil {
+				return nil, err
+			}
+		}
+		return s.applyLearningDelete(ctx, q, userID, item, EntityCourseSchedule, "course_schedules",
+			obj != nil, obj != nil && obj.deletedAt != nil, scheduleRowView(obj))
+	}
+
+	recurrence := "weekly"
+	if p.ScheduleRecurrence != nil && *p.ScheduleRecurrence != "" {
+		recurrence = *p.ScheduleRecurrence
+	}
+	switch recurrence {
+	case "weekly", "biweekly", "odd_weeks", "even_weeks", "once":
+	default:
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Dates: semester range is required (parsed before any write); the
+	// parity anchor and once_date are optional but must parse when set.
+	var semesterStart, semesterEnd *time.Time
+	if p.ScheduleSemesterStart != nil {
+		if semesterStart, err = parseWireDate(*p.ScheduleSemesterStart); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+	if p.ScheduleSemesterEnd != nil {
+		if semesterEnd, err = parseWireDate(*p.ScheduleSemesterEnd); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+	var parityAnchor, onceDate *time.Time
+	if p.ScheduleParityAnchor != nil {
+		if parityAnchor, err = parseWireDate(*p.ScheduleParityAnchor); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+	if p.ScheduleOnceDate != nil {
+		if onceDate, err = parseWireDate(*p.ScheduleOnceDate); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+
+	timezone := "UTC"
+	if p.ScheduleTimezone != nil && *p.ScheduleTimezone != "" {
+		timezone = *p.ScheduleTimezone
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Effective values for insert; merge decisions for update.
+	weekday, startSecs, endSecs := 1, 0, 0
+	teacher, location, note := "", "", ""
+	reminderMins, firstWeekOdd, enabled := -1, true, true
+	if p.ScheduleWeekday != nil {
+		weekday = *p.ScheduleWeekday
+	}
+	if p.ScheduleStartSecs != nil {
+		startSecs = *p.ScheduleStartSecs
+	}
+	if p.ScheduleEndSecs != nil {
+		endSecs = *p.ScheduleEndSecs
+	}
+	if p.ScheduleTeacher != nil {
+		teacher = *p.ScheduleTeacher
+	}
+	if p.ScheduleLocation != nil {
+		location = *p.ScheduleLocation
+	}
+	if p.ScheduleNote != nil {
+		note = *p.ScheduleNote
+	}
+	if p.ScheduleReminderMins != nil {
+		reminderMins = *p.ScheduleReminderMins
+	}
+	if p.ScheduleFirstWeekOdd != nil {
+		firstWeekOdd = *p.ScheduleFirstWeekOdd
+	}
+	if p.ScheduleEnabled != nil {
+		enabled = *p.ScheduleEnabled
+	}
+	courseID := refOrNil(p.CourseID)
+
+	if obj == nil {
+		if semesterStart == nil || semesterEnd == nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO course_schedules
+				(id, user_id, course_id, weekday, start_secs, end_secs, recurrence,
+				 week_parity_anchor, first_week_is_odd, semester_start, semester_end,
+				 timezone, teacher_override, location_override, note,
+				 reminder_lead_mins, is_enabled, once_date,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7,
+			        $8, $9, $10, $11,
+			        $12, $13, $14, $15,
+			        $16, $17, $18,
+			        1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, courseID, weekday, startSecs, endSecs, recurrence,
+			parityAnchor, firstWeekOdd, semesterStart, semesterEnd,
+			timezone, teacher, location, note,
+			reminderMins, enabled, onceDate,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityCourseSchedule, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		res := conflict(item, obj.serverVer, obj.updatedAt, courseScheduleRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, courseScheduleRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge: incoming non-default wins; empty strings clear optional
+	// overrides (the exception/schedule convention — covers must be
+	// revertible). Booleans and ints always apply when present.
+	if semesterStart == nil {
+		semesterStart = &obj.semesterStart
+	}
+	if semesterEnd == nil {
+		semesterEnd = &obj.semesterEnd
+	}
+	if parityAnchor == nil {
+		parityAnchor = obj.parityAnchor
+	}
+	if onceDate == nil {
+		onceDate = obj.onceDate
+	}
+	if timezone == "UTC" && obj.timezone != "" {
+		timezone = obj.timezone
+	}
+	if teacher == "" {
+		teacher = obj.teacher
+	}
+	if location == "" {
+		location = obj.location
+	}
+	if note == "" {
+		note = obj.note
+	}
+	if p.ScheduleWeekday == nil {
+		weekday = obj.weekday
+	}
+	if p.ScheduleStartSecs == nil {
+		startSecs = obj.startSecs
+	}
+	if p.ScheduleEndSecs == nil {
+		endSecs = obj.endSecs
+	}
+	if p.ScheduleReminderMins == nil {
+		reminderMins = obj.reminderMins
+	}
+	if p.ScheduleFirstWeekOdd == nil {
+		firstWeekOdd = obj.firstWeekOdd
+	}
+	if p.ScheduleEnabled == nil {
+		enabled = obj.enabled
+	}
+	courseID = mergeRef(obj.courseID, p.CourseID)
+
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE course_schedules
+		SET course_id = $3, weekday = $4, start_secs = $5, end_secs = $6,
+		    recurrence = $7, week_parity_anchor = $8, first_week_is_odd = $9,
+		    semester_start = $10, semester_end = $11, timezone = $12,
+		    teacher_override = $13, location_override = $14, note = $15,
+		    reminder_lead_mins = $16, is_enabled = $17, once_date = $18,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, courseID, weekday, startSecs, endSecs,
+		recurrence, parityAnchor, firstWeekOdd, semesterStart, semesterEnd, timezone,
+		teacher, location, note, reminderMins, enabled, onceDate,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityCourseSchedule, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// applyScheduleException: one dated deviation of a schedule. Schema: the
+// owning schedule must be a non-nil UUID, kind must be known. Ad-hoc rows
+// (one-off extra classes) carry no original date. Deletion is plain
+// (no cascade — exceptions are leaves).
+func (s *Service) applyScheduleException(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchScheduleException(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		return s.applyLearningDelete(ctx, q, userID, item, EntityScheduleException, "schedule_exceptions",
+			obj != nil, obj != nil && obj.deletedAt != nil, exceptionRowView(obj))
+	}
+
+	kind := "cancelled"
+	if p.ScheduleExceptionKind != nil && *p.ScheduleExceptionKind != "" {
+		kind = *p.ScheduleExceptionKind
+	}
+	switch kind {
+	case "cancelled", "time_changed", "ad_hoc":
+	default:
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	scheduleID := p.ScheduleID
+	if scheduleID == nil || *scheduleID == uuid.Nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	var originalDate, movedToDate *time.Time
+	if p.ScheduleOriginalDate != nil {
+		if originalDate, err = parseWireDate(*p.ScheduleOriginalDate); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+	if p.ScheduleMovedToDate != nil {
+		if movedToDate, err = parseWireDate(*p.ScheduleMovedToDate); err != nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+	}
+
+	location, teacher, note := "", "", ""
+	if p.ScheduleLocation != nil {
+		location = *p.ScheduleLocation
+	}
+	if p.ScheduleTeacher != nil {
+		teacher = *p.ScheduleTeacher
+	}
+	if p.ScheduleNote != nil {
+		note = *p.ScheduleNote
+	}
+	changedStart, changedEnd := p.ScheduleChangedStart, p.ScheduleChangedEnd
+	courseID := refOrNil(p.CourseID)
+
+	if obj == nil {
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO schedule_exceptions
+				(id, user_id, schedule_id, course_id, original_date, exception_kind,
+				 changed_start, changed_end, moved_to_date,
+				 location_override, teacher_override, note,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6,
+			        $7, $8, $9,
+			        $10, $11, $12,
+			        1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, scheduleID, courseID, originalDate, kind,
+			changedStart, changedEnd, movedToDate,
+			location, teacher, note,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityScheduleException, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		res := conflict(item, obj.serverVer, obj.updatedAt, scheduleExceptionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, scheduleExceptionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge. originalDate/movedToDate keep the stored value when the
+	// payload omits them; the empty-string wire value clears (NULL).
+	if p.ScheduleOriginalDate == nil {
+		originalDate = obj.originalDate
+	}
+	if p.ScheduleMovedToDate == nil {
+		movedToDate = obj.movedToDate
+	}
+	if location == "" {
+		location = obj.location
+	}
+	if teacher == "" {
+		teacher = obj.teacher
+	}
+	if note == "" {
+		note = obj.note
+	}
+	if changedStart == nil {
+		changedStart = obj.changedStart
+	}
+	if changedEnd == nil {
+		changedEnd = obj.changedEnd
+	}
+	courseID = mergeRef(obj.courseID, p.CourseID)
+	scheduleID = mergeRefSchedule(obj.scheduleID, p.ScheduleID)
+
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE schedule_exceptions
+		SET schedule_id = $3, course_id = $4, original_date = $5, exception_kind = $6,
+		    changed_start = $7, changed_end = $8, moved_to_date = $9,
+		    location_override = $10, teacher_override = $11, note = $12,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, scheduleID, courseID, originalDate, kind,
+		changedStart, changedEnd, movedToDate,
+		location, teacher, note,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityScheduleException, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// mergeRefSchedule is mergeRef for a REQUIRED schedule reference: absent
+// keeps, uuid.Nil clears (NULL — the row becomes orphaned but stays; the
+// client shows "来源日程已不存在"), any other UUID assigns.
+func mergeRefSchedule(stored uuid.UUID, p *uuid.UUID) *uuid.UUID {
+	if p == nil {
+		v := stored
+		return &v
+	}
+	if *p == uuid.Nil {
+		return nil
+	}
+	return p
+}
+
 // learningRowView is the minimal projection applyLearningDelete needs
 // from a fetched row (nil-safe: every helper below accepts a nil row).
 type learningRowView struct {
@@ -3692,6 +4408,18 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return correctionRecordJSON(obj), nil
+	case EntityCourseSchedule:
+		obj, err := fetchCourseSchedule(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return courseScheduleRecordJSON(obj), nil
+	case EntityScheduleException:
+		obj, err := fetchScheduleException(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return scheduleExceptionRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -3700,7 +4428,7 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
-	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections int
+	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections, schedules, exceptions int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -3713,8 +4441,10 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM glossary_terms WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_cards WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_tasks WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM transcript_corrections WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections)
+			(SELECT count(*) FROM transcript_corrections WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM course_schedules WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM schedule_exceptions WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions)
 	if err != nil {
 		return nil, err
 	}
@@ -3733,6 +4463,8 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		StudyCardCount:            cards,
 		StudyTaskCount:            tasks,
 		TranscriptCorrectionCount: corrections,
+		CourseScheduleCount:       schedules,
+		ScheduleExceptionCount:    exceptions,
 		PendingCount:              0,
 		ServerTime:                time.Now(),
 	}, nil

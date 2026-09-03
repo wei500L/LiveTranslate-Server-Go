@@ -174,6 +174,45 @@ type PushPayload struct {
 	AttachmentAnalysisState *string `json:"attachmentAnalysisStatus"`
 	AttachmentAnalysis      *string `json:"attachmentAnalysis"`
 	AttachmentOcrText       *string `json:"attachmentOcrText"`
+	// Course schedule (recurring rule). The course reference rides the
+	// shared CourseID sentinel field above (nil keeps; uuid.Nil clears).
+	// Times are wall-clock seconds since midnight in the course timezone;
+	// dates are YYYY-MM-DD strings (DATE columns). The timezone id itself
+	// travels as ScheduleTimezone. Reminder lead: -1 none | 0 at start |
+	// >0 minutes before start. Absent pointer = keep stored value.
+	ScheduleWeekday       *int    `json:"scheduleWeekday"`
+	ScheduleStartSecs     *int    `json:"scheduleStartSecs"`
+	ScheduleEndSecs       *int    `json:"scheduleEndSecs"`
+	ScheduleRecurrence    *string `json:"scheduleRecurrence"`
+	ScheduleParityAnchor  *string `json:"scheduleParityAnchor"`
+	ScheduleFirstWeekOdd  *bool   `json:"scheduleFirstWeekIsOdd"`
+	ScheduleSemesterStart *string `json:"scheduleSemesterStart"`
+	ScheduleSemesterEnd   *string `json:"scheduleSemesterEnd"`
+	ScheduleTimezone      *string `json:"scheduleTimezone"`
+	ScheduleTeacher       *string `json:"scheduleTeacher"`
+	ScheduleLocation      *string `json:"scheduleLocation"`
+	ScheduleNote          *string `json:"scheduleNote"`
+	ScheduleReminderMins  *int    `json:"scheduleReminderMins"`
+	ScheduleEnabled       *bool   `json:"scheduleEnabled"`
+	ScheduleOnceDate      *string `json:"scheduleOnceDate"`
+	// Session schedule linkage: the occurrence key and planned start of
+	// the class a session belongs to. Absent keeps stored (historical
+	// attribution never changes once set; a deleted schedule leaves the
+	// session's key dangling by design).
+	ScheduleOccurrenceKey *string    `json:"scheduleOccurrenceKey"`
+	SchedulePlannedStart  *time.Time `json:"schedulePlannedStart"`
+	// Shared schedule reference: the schedule that owns an exception, and
+	// the schedule a session was started from. Absent (nil) keeps the
+	// stored value; uuid.Nil explicitly CLEARS it.
+	ScheduleID *uuid.UUID `json:"scheduleId"`
+	// Schedule exception (one dated deviation of a schedule). originalDate
+	// is "YYYY-MM-DD" ("" = ad-hoc extra occurrence). Times are wall-clock
+	// seconds since midnight in the course timezone.
+	ScheduleOriginalDate  *string `json:"scheduleOriginalDate"`
+	ScheduleExceptionKind *string `json:"scheduleExceptionKind"`
+	ScheduleChangedStart  *int    `json:"scheduleChangedStart"`
+	ScheduleChangedEnd    *int    `json:"scheduleChangedEnd"`
+	ScheduleMovedToDate   *string `json:"scheduleMovedToDate"`
 }
 
 type PushItem struct {
@@ -240,6 +279,8 @@ type SyncStatusResponse struct {
 	StudyCardCount            int       `json:"studyCardCount"`
 	StudyTaskCount            int       `json:"studyTaskCount"`
 	TranscriptCorrectionCount int       `json:"transcriptCorrectionCount"`
+	CourseScheduleCount       int       `json:"courseScheduleCount"`
+	ScheduleExceptionCount    int       `json:"scheduleExceptionCount"`
 	PendingCount              int       `json:"pendingCount"`
 	ServerTime                time.Time `json:"serverTime"`
 }
@@ -261,6 +302,9 @@ const (
 	// 21 chars — fits the VARCHAR(32) entity_type columns widened by
 	// migration 00008.
 	EntityTranscriptCorrection = "transcript_correction"
+	// 15 / 17 chars — both fit the VARCHAR(32) entity_type columns.
+	EntityCourseSchedule    = "course_schedule"
+	EntityScheduleException = "schedule_exception"
 )
 
 func validEntityType(t string) bool {
@@ -269,7 +313,8 @@ func validEntityType(t string) bool {
 		t == EntityCourse || t == EntityNote ||
 		t == EntityStudyReview || t == EntityAttachment ||
 		t == EntityTerm || t == EntityStudyCard || t == EntityStudyTask ||
-		t == EntityTranscriptCorrection
+		t == EntityTranscriptCorrection ||
+		t == EntityCourseSchedule || t == EntityScheduleException
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -476,4 +521,48 @@ type transcriptCorrectionRecord struct {
 	NeedsRetrans  bool      `json:"correctionNeedsRetranslation"`
 	ServerVersion int       `json:"serverVersion"`
 	Deleted       bool      `json:"deleted"`
+}
+
+// courseScheduleRecord / scheduleExceptionRecord: field names mirror the
+// push payload (scheduleXxx family) so iOS decodes records and conflict
+// payloads with the same CodingKeys. Dates are YYYY-MM-DD strings; times
+// are wall-clock seconds since midnight in the schedule's timezone.
+type courseScheduleRecord struct {
+	EntityType     string  `json:"entityType"`
+	ID             string  `json:"id"`
+	CourseID       *string `json:"courseId,omitempty"`
+	Weekday        int     `json:"scheduleWeekday"`
+	StartSecs      int     `json:"scheduleStartSecs"`
+	EndSecs        int     `json:"scheduleEndSecs"`
+	Recurrence     string  `json:"scheduleRecurrence"`
+	ParityAnchor   *string `json:"scheduleParityAnchor,omitempty"`
+	FirstWeekIsOdd bool    `json:"scheduleFirstWeekIsOdd"`
+	SemesterStart  string  `json:"scheduleSemesterStart"`
+	SemesterEnd    string  `json:"scheduleSemesterEnd"`
+	Timezone       string  `json:"scheduleTimezone"`
+	Teacher        string  `json:"scheduleTeacher"`
+	Location       string  `json:"scheduleLocation"`
+	Note           string  `json:"scheduleNote"`
+	ReminderMins   int     `json:"scheduleReminderMins"`
+	Enabled        bool    `json:"scheduleEnabled"`
+	OnceDate       *string `json:"scheduleOnceDate,omitempty"`
+	ServerVersion  int     `json:"serverVersion"`
+	Deleted        bool    `json:"deleted"`
+}
+
+type scheduleExceptionRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	ScheduleID    string  `json:"scheduleId"`
+	CourseID      *string `json:"courseId,omitempty"`
+	OriginalDate  *string `json:"scheduleOriginalDate,omitempty"`
+	ExceptionKind string  `json:"scheduleExceptionKind"`
+	ChangedStart  *int    `json:"scheduleChangedStart,omitempty"`
+	ChangedEnd    *int    `json:"scheduleChangedEnd,omitempty"`
+	MovedToDate   *string `json:"scheduleMovedToDate,omitempty"`
+	Location      string  `json:"scheduleLocation"`
+	Teacher       string  `json:"scheduleTeacher"`
+	Note          string  `json:"scheduleNote"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
 }

@@ -744,3 +744,200 @@ func TestSyncEntryTimeSource(t *testing.T) {
 		}
 	}
 }
+
+// §Course schedules + exceptions: lifecycle round trip over the real HTTP
+// surface — insert@v1, merge on base==ver, delete cascades (schedule →
+// exceptions, course → schedules), tombstone records in pull, status counts.
+func TestSyncCourseScheduleLifecycle(t *testing.T) {
+	e := newEnv(t, nil)
+	u := e.registerAndVerify("schedule@example.com", "correct-horse-battery-9")
+
+	// Course to own the schedules (course fields ride the shared title
+	// rider + courseId).
+	courseID := uuid.New().String()
+	_, _, out := e.push(t, u.AccessToken, map[string]any{
+		"operationId":     uuid.New().String(),
+		"entityType":      "course",
+		"entityId":        courseID,
+		"operation":       "upsert",
+		"baseVersion":     0,
+		"clientUpdatedAt": "2026-09-01T09:00:00Z",
+		"payload":         map[string]any{"title": "Уравнения математической физики", "courseId": courseID},
+	})
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("course push failed: %v", out)
+	}
+
+	scheduleOp := func(opID, entityID string, base int, mutators ...func(map[string]any)) map[string]any {
+		payload := map[string]any{
+			"courseId":               courseID,
+			"scheduleWeekday":        1,
+			"scheduleStartSecs":      37800, // 10:30
+			"scheduleEndSecs":        43500, // 12:05
+			"scheduleRecurrence":     "odd_weeks",
+			"scheduleParityAnchor":   "2026-09-07",
+			"scheduleFirstWeekIsOdd": true,
+			"scheduleSemesterStart":  "2026-09-01",
+			"scheduleSemesterEnd":    "2026-12-31",
+			"scheduleTimezone":       "Europe/Moscow",
+			"scheduleTeacher":        "Иванов",
+			"scheduleLocation":       "ауд. 1204",
+			"scheduleReminderMins":   15,
+			"scheduleEnabled":        true,
+		}
+		for _, m := range mutators {
+			m(payload)
+		}
+		return map[string]any{
+			"operationId":     opID,
+			"entityType":      "course_schedule",
+			"entityId":        entityID,
+			"operation":       "upsert",
+			"baseVersion":     base,
+			"clientUpdatedAt": "2026-09-01T10:00:00Z",
+			"payload":         payload,
+		}
+	}
+
+	// Insert at v1.
+	schedID := uuid.New().String()
+	_, _, out = e.push(t, u.AccessToken, scheduleOp(uuid.New().String(), schedID, 0))
+	r := results(t, out)[0]
+	if resultField(t, r, "status") != "accepted" {
+		t.Fatalf("schedule push failed: %v", r)
+	}
+	if v := int(resultField(t, r, "serverVersion").(float64)); v != 1 {
+		t.Fatalf("schedule serverVersion = %d, want 1", v)
+	}
+
+	// Merge on base==ver: a newer device moves the class to Wednesday.
+	_, _, out = e.push(t, u.AccessToken, scheduleOp(uuid.New().String(), schedID, 1,
+		func(p map[string]any) { p["scheduleWeekday"] = 3 }))
+	r = results(t, out)[0]
+	if resultField(t, r, "status") != "accepted" {
+		t.Fatalf("schedule merge failed: %v", r)
+	}
+	var weekday int
+	_ = testDB.Pool.QueryRow(t.Context(),
+		`SELECT weekday FROM course_schedules WHERE id = $1`, schedID).Scan(&weekday)
+	if weekday != 3 {
+		t.Fatalf("merged weekday = %d, want 3", weekday)
+	}
+
+	// Bad recurrence → rejected.
+	bad := scheduleOp(uuid.New().String(), uuid.New().String(), 0,
+		func(p map[string]any) { p["scheduleRecurrence"] = "fortnightly" })
+	_, _, out = e.push(t, u.AccessToken, bad)
+	if resultField(t, results(t, out)[0], "status") != "rejected" {
+		t.Fatalf("bad recurrence accepted: %v", out)
+	}
+
+	// Exception upsert (cancel one dated occurrence).
+	excID := uuid.New().String()
+	_, _, out = e.push(t, u.AccessToken, map[string]any{
+		"operationId":     uuid.New().String(),
+		"entityType":      "schedule_exception",
+		"entityId":        excID,
+		"operation":       "upsert",
+		"baseVersion":     0,
+		"clientUpdatedAt": "2026-09-02T10:00:00Z",
+		"payload": map[string]any{
+			"scheduleId":            schedID,
+			"courseId":              courseID,
+			"scheduleOriginalDate":  "2026-09-21",
+			"scheduleExceptionKind": "cancelled",
+			"scheduleNote":          "老师出差",
+		},
+	})
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("exception push failed: %v", out)
+	}
+
+	// Exception without a schedule reference → rejected.
+	_, _, out = e.push(t, u.AccessToken, map[string]any{
+		"operationId":     uuid.New().String(),
+		"entityType":      "schedule_exception",
+		"entityId":        uuid.New().String(),
+		"operation":       "upsert",
+		"baseVersion":     0,
+		"clientUpdatedAt": "2026-09-02T10:00:00Z",
+		"payload": map[string]any{
+			"scheduleExceptionKind": "cancelled",
+		},
+	})
+	if resultField(t, results(t, out)[0], "status") != "rejected" {
+		t.Fatalf("orphan exception accepted: %v", out)
+	}
+
+	// Schedule delete cascades to its exceptions.
+	_, _, out = e.push(t, u.AccessToken, deleteOp(uuid.New().String(), "course_schedule", schedID, 2))
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("schedule delete failed: %v", out)
+	}
+	var excDeleted *string
+	_ = testDB.Pool.QueryRow(t.Context(),
+		`SELECT deleted_at::text FROM schedule_exceptions WHERE id = $1`, excID).Scan(&excDeleted)
+	if excDeleted == nil {
+		t.Fatalf("exception survived schedule delete")
+	}
+
+	// Course delete cascades to schedules (create a second schedule).
+	schedID2 := uuid.New().String()
+	_, _, out = e.push(t, u.AccessToken, scheduleOp(uuid.New().String(), schedID2, 0))
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("second schedule push failed: %v", out)
+	}
+	_, _, out = e.push(t, u.AccessToken, deleteOp(uuid.New().String(), "course", courseID, 1))
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("course delete failed: %v", out)
+	}
+	var schedDeleted *string
+	_ = testDB.Pool.QueryRow(t.Context(),
+		`SELECT deleted_at::text FROM course_schedules WHERE id = $1`, schedID2).Scan(&schedDeleted)
+	if schedDeleted == nil {
+		t.Fatalf("schedule survived course delete")
+	}
+
+	// Pull round-trips the record shapes (scheduleXxx keys).
+	changes, _, _ := e.pull(t, u.AccessToken, 0, 0)
+	sawSchedule, sawException := false, false
+	for _, c := range changes {
+		m := c.(map[string]any)
+		if m["entityType"] == "course_schedule" && m["operation"] == "upsert" {
+			rec := m["record"].(map[string]any)
+			if rec["id"] != schedID2 {
+				continue
+			}
+			sawSchedule = true
+			if rec["scheduleTimezone"] != "Europe/Moscow" {
+				t.Fatalf("schedule record timezone wrong: %v", rec)
+			}
+			if rec["scheduleRecurrence"] != "odd_weeks" {
+				t.Fatalf("schedule record recurrence wrong: %v", rec)
+			}
+		}
+		if m["entityType"] == "schedule_exception" && m["operation"] == "delete" {
+			sawException = true
+		}
+	}
+	if !sawSchedule {
+		t.Fatalf("no course_schedule record in pull")
+	}
+	if !sawException {
+		t.Fatalf("no schedule_exception delete change in pull")
+	}
+
+	// Status counts live rows (all tombstoned by now → 0).
+	resp, raw := e.get("/v1/sync/status", u.AccessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: %d %s", resp.StatusCode, raw)
+	}
+	var st struct {
+		CourseScheduleCount    int `json:"courseScheduleCount"`
+		ScheduleExceptionCount int `json:"scheduleExceptionCount"`
+	}
+	decode(t, raw, &st)
+	if st.CourseScheduleCount != 0 || st.ScheduleExceptionCount != 0 {
+		t.Fatalf("counts = %d/%d, want 0/0 (all tombstoned)", st.CourseScheduleCount, st.ScheduleExceptionCount)
+	}
+}

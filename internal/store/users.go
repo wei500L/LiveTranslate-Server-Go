@@ -151,6 +151,7 @@ func PurgeUserSyncData(ctx context.Context, q Q, userID uuid.UUID) error {
 	for _, table := range []string{
 		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
 		"study_reviews", "session_attachments", "classroom_sessions", "courses",
+		"glossary_terms", "study_cards", "study_tasks",
 		"sync_changes", "processed_operations",
 	} {
 		if _, err := q.Exec(ctx,

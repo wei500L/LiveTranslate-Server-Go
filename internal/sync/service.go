@@ -461,6 +461,228 @@ type AttachmentMeta struct {
 
 // GetAttachmentMeta loads the ownership/contract fields of one
 // attachment. Nil means the row does not exist for this user.
+
+// --- Learning entities: term / study_card / study_task ----------------------------
+
+type termRow struct {
+	id            uuid.UUID
+	userID        uuid.UUID
+	courseID      *uuid.UUID
+	sessionID     *uuid.UUID
+	sourceReview  *uuid.UUID
+	sourceEntry   *uuid.UUID
+	sourceAttach  *uuid.UUID
+	sourceSessIDs string
+	russian       string
+	chinese       string
+	explanation   string
+	partOfSpeech  string
+	userNote      string
+	favorite      bool
+	status        string
+	serverVer     int
+	createdAt     time.Time
+	updatedAt     time.Time
+	deletedAt     *time.Time
+}
+
+func fetchTerm(ctx context.Context, q store.Q, userID, id uuid.UUID) (*termRow, error) {
+	t := &termRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, course_id, session_id, source_review_id,
+		       source_entry_id, source_attachment_id, source_session_ids,
+		       russian, chinese, explanation, part_of_speech, user_note,
+		       is_favorite, status,
+		       server_version, created_at, updated_at, deleted_at
+		FROM glossary_terms WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&t.id, &t.userID, &t.courseID, &t.sessionID, &t.sourceReview,
+		&t.sourceEntry, &t.sourceAttach, &t.sourceSessIDs,
+		&t.russian, &t.chinese, &t.explanation, &t.partOfSpeech, &t.userNote,
+		&t.favorite, &t.status,
+		&t.serverVer, &t.createdAt, &t.updatedAt, &t.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func termRecordJSON(t *termRow) json.RawMessage {
+	courseID, sessionID, review, entry, attach := optUUIDString(t.courseID), optUUIDString(t.sessionID), optUUIDString(t.sourceReview), optUUIDString(t.sourceEntry), optUUIDString(t.sourceAttach)
+	b, _ := json.Marshal(termRecord{
+		EntityType: EntityTerm, ID: t.id.String(),
+		CourseID: courseID, SessionID: sessionID,
+		SourceReview: review, SourceEntry: entry, SourceAttach: attach,
+		SourceSessIDs: t.sourceSessIDs,
+		Russian:       t.russian, Chinese: t.chinese, Explanation: t.explanation,
+		PartOfSpeech: t.partOfSpeech, UserNote: t.userNote,
+		Favorite: t.favorite, Status: t.status,
+		ServerVersion: t.serverVer, Deleted: t.deletedAt != nil,
+	})
+	return b
+}
+
+type studyCardRow struct {
+	id            uuid.UUID
+	userID        uuid.UUID
+	courseID      *uuid.UUID
+	sessionID     *uuid.UUID
+	sourceEntry   *uuid.UUID
+	sourceAttach  *uuid.UUID
+	sourceTerm    *uuid.UUID
+	front         string
+	back          string
+	cardType      string
+	userNote      string
+	origin        string
+	stage         string
+	reviewCount   int
+	intervalHours int
+	dueAt         *time.Time
+	lastReviewed  *time.Time
+	lastGrade     string
+	serverVer     int
+	createdAt     time.Time
+	updatedAt     time.Time
+	deletedAt     *time.Time
+}
+
+func fetchStudyCard(ctx context.Context, q store.Q, userID, id uuid.UUID) (*studyCardRow, error) {
+	c := &studyCardRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, course_id, session_id, source_entry_id,
+		       source_attachment_id, source_term_id,
+		       front, back, card_type, user_note, origin,
+		       stage, review_count, interval_hours, due_at, last_reviewed_at, last_grade,
+		       server_version, created_at, updated_at, deleted_at
+		FROM study_cards WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&c.id, &c.userID, &c.courseID, &c.sessionID, &c.sourceEntry,
+		&c.sourceAttach, &c.sourceTerm,
+		&c.front, &c.back, &c.cardType, &c.userNote, &c.origin,
+		&c.stage, &c.reviewCount, &c.intervalHours, &c.dueAt, &c.lastReviewed, &c.lastGrade,
+		&c.serverVer, &c.createdAt, &c.updatedAt, &c.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func studyCardRecordJSON(c *studyCardRow) json.RawMessage {
+	courseID, sessionID, entry, attach, term := optUUIDString(c.courseID), optUUIDString(c.sessionID), optUUIDString(c.sourceEntry), optUUIDString(c.sourceAttach), optUUIDString(c.sourceTerm)
+	b, _ := json.Marshal(studyCardRecord{
+		EntityType: EntityStudyCard, ID: c.id.String(),
+		CourseID: courseID, SessionID: sessionID,
+		SourceEntry: entry, SourceAttach: attach, SourceTerm: term,
+		Front: c.front, Back: c.back, CardType: c.cardType, UserNote: c.userNote,
+		Origin: c.origin, Stage: c.stage,
+		ReviewCount: c.reviewCount, IntervalHrs: c.intervalHours,
+		DueAt: c.dueAt, LastReviewed: c.lastReviewed, LastGrade: c.lastGrade,
+		ServerVersion: c.serverVer, Deleted: c.deletedAt != nil,
+	})
+	return b
+}
+
+type studyTaskRow struct {
+	id           uuid.UUID
+	userID       uuid.UUID
+	courseID     *uuid.UUID
+	sessionID    *uuid.UUID
+	sourceReview *uuid.UUID
+	sourceEntry  *uuid.UUID
+	sourceAttach *uuid.UUID
+	title        string
+	detail       string
+	dueAt        *time.Time
+	priority     string
+	status       string
+	origin       string
+	uncertainty  string
+	userNote     string
+	completedAt  *time.Time
+	serverVer    int
+	createdAt    time.Time
+	updatedAt    time.Time
+	deletedAt    *time.Time
+}
+
+func fetchStudyTask(ctx context.Context, q store.Q, userID, id uuid.UUID) (*studyTaskRow, error) {
+	t := &studyTaskRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, course_id, session_id, source_review_id,
+		       source_entry_id, source_attachment_id,
+		       title, detail, due_at, priority, status, origin,
+		       uncertainty, user_note, completed_at,
+		       server_version, created_at, updated_at, deleted_at
+		FROM study_tasks WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&t.id, &t.userID, &t.courseID, &t.sessionID, &t.sourceReview,
+		&t.sourceEntry, &t.sourceAttach,
+		&t.title, &t.detail, &t.dueAt, &t.priority, &t.status, &t.origin,
+		&t.uncertainty, &t.userNote, &t.completedAt,
+		&t.serverVer, &t.createdAt, &t.updatedAt, &t.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func studyTaskRecordJSON(t *studyTaskRow) json.RawMessage {
+	courseID, sessionID, review, entry, attach := optUUIDString(t.courseID), optUUIDString(t.sessionID), optUUIDString(t.sourceReview), optUUIDString(t.sourceEntry), optUUIDString(t.sourceAttach)
+	b, _ := json.Marshal(studyTaskRecord{
+		EntityType: EntityStudyTask, ID: t.id.String(), Title: t.title,
+		CourseID: courseID, SessionID: sessionID,
+		SourceReview: review, SourceEntry: entry, SourceAttach: attach,
+		Detail: t.detail, DueAt: t.dueAt, Priority: t.priority, Status: t.status,
+		Origin: t.origin, Uncertainty: t.uncertainty, UserNote: t.userNote,
+		CompletedAt:   t.completedAt,
+		ServerVersion: t.serverVer, Deleted: t.deletedAt != nil,
+	})
+	return b
+}
+
+// optUUIDString renders a nullable UUID as an optional wire string (nil
+// pointer = key omitted = "no source / unscoped").
+func optUUIDString(u *uuid.UUID) *string {
+	if u == nil {
+		return nil
+	}
+	s := u.String()
+	return &s
+}
+
+// refOrNil converts a payload reference field into a row value: nil (keep
+// — never reaches an INSERT) and the nil-UUID sentinel both become SQL
+// NULL; a real UUID passes through. Used on INSERT paths where absence
+// and "cleared" are the same thing (nothing stored to keep).
+func refOrNil(p *uuid.UUID) *uuid.UUID {
+	if p == nil || *p == uuid.Nil {
+		return nil
+	}
+	return p
+}
+
+// mergeRef applies the reference-merge sentinel to an existing row value:
+// absent payload field keeps the stored ref; uuid.Nil clears it; any
+// other UUID assigns it.
+func mergeRef(stored *uuid.UUID, p *uuid.UUID) *uuid.UUID {
+	if p == nil {
+		return stored
+	}
+	if *p == uuid.Nil {
+		return nil
+	}
+	return p
+}
+
+// GetAttachmentMeta loads the ownership/contract fields of one
+// attachment. Nil means the row does not exist for this user.
 func GetAttachmentMeta(ctx context.Context, q store.Q, userID, id uuid.UUID) (*AttachmentMeta, error) {
 	var deletedAt *time.Time
 	var mime, hash string
@@ -600,6 +822,12 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyNote(ctx, q, userID, item)
 	case EntityAttachment:
 		return s.applyAttachment(ctx, q, userID, item)
+	case EntityTerm:
+		return s.applyTerm(ctx, q, userID, item)
+	case EntityStudyCard:
+		return s.applyStudyCard(ctx, q, userID, item)
+	case EntityStudyTask:
+		return s.applyStudyTask(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -1493,6 +1721,11 @@ func (s *Service) applyCourse(ctx context.Context, q store.Q, userID uuid.UUID, 
 		if err := s.detachCourseFromSessions(ctx, q, userID, item.EntityID); err != nil {
 			return nil, err
 		}
+		// Learning material survives too — terms/cards/tasks keep their
+		// rows and schedule, only the course scoping reference is cleared.
+		if err := s.detachCourseFromStudyData(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
 		res := accepted(item, version, updatedAt)
 		if err := storeLedger(ctx, q, userID, item, res); err != nil {
 			return nil, err
@@ -1643,6 +1876,51 @@ func (s *Service) detachCourseFromSessions(ctx context.Context, q store.Q, userI
 	for _, b := range sessions {
 		if err := logChange(ctx, q, userID, EntitySession, b.id, "upsert", b.v); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// detachCourseFromStudyData clears the course reference on the user's
+// live learning material (terms/cards/tasks) that pointed at the deleted
+// course. The rows themselves are NEVER deleted by a course deletion —
+// learned cards and terms outlive their course; only the scoping
+// reference goes, matching the iOS-side semantics.
+func (s *Service) detachCourseFromStudyData(ctx context.Context, q store.Q, userID, courseID uuid.UUID) error {
+	for _, pair := range []struct{ table, entity string }{
+		{"glossary_terms", EntityTerm},
+		{"study_cards", EntityStudyCard},
+		{"study_tasks", EntityStudyTask},
+	} {
+		rows, err := q.Query(ctx, `
+			UPDATE `+pair.table+`
+			SET course_id = NULL, server_version = server_version + 1, updated_at = now()
+			WHERE user_id = $1 AND course_id = $2 AND deleted_at IS NULL
+			RETURNING id, server_version`, userID, courseID)
+		if err != nil {
+			return err
+		}
+		type bumped struct {
+			id uuid.UUID
+			v  int
+		}
+		var items []bumped
+		for rows.Next() {
+			b := bumped{}
+			if err := rows.Scan(&b.id, &b.v); err != nil {
+				rows.Close()
+				return err
+			}
+			items = append(items, b)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, b := range items {
+			if err := logChange(ctx, q, userID, pair.entity, b.id, "upsert", b.v); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2313,6 +2591,658 @@ func (s *Service) applyAttachment(ctx context.Context, q store.Q, userID uuid.UU
 	return res, nil
 }
 
+// applyTerm: glossary term. Text fields merge like noteText (non-empty
+// incoming wins — the product has no clear-to-empty flow; removal is a
+// delete); favorite/status overwrite when present; source references
+// follow the uuid.Nil-clears sentinel. The server does NOT enforce
+// per-course term uniqueness — dedup/merge is a client-side,
+// user-confirmed flow.
+func (s *Service) applyTerm(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchTerm(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	// Delete path (phantom / idempotent / live), shared helper below.
+	if item.Operation == "delete" {
+		return s.applyLearningDelete(ctx, q, userID, item, EntityTerm, "glossary_terms",
+			obj != nil, obj != nil && obj.deletedAt != nil, termRowView(obj))
+	}
+
+	// upsert: the Russian word is the term's identity — required.
+	if p.TermRussian == nil || *p.TermRussian == "" {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		chinese, explanation, pos, note := "", "", "", ""
+		if p.TermChinese != nil {
+			chinese = *p.TermChinese
+		}
+		if p.TermExplanation != nil {
+			explanation = *p.TermExplanation
+		}
+		if p.TermPartOfSpeech != nil {
+			pos = *p.TermPartOfSpeech
+		}
+		if p.TermUserNote != nil {
+			note = *p.TermUserNote
+		}
+		sourceSessions := ""
+		if p.TermSourceSessions != nil {
+			sourceSessions = *p.TermSourceSessions
+		}
+		favorite := false
+		if p.TermFavorite != nil {
+			favorite = *p.TermFavorite
+		}
+		status := "new"
+		if p.TermStatus != nil && *p.TermStatus != "" {
+			status = *p.TermStatus
+		}
+		courseID := refOrNil(p.CourseID)
+		sessionID := refOrNil(p.SessionID)
+		reviewID := refOrNil(p.SourceReviewID)
+		entryID := refOrNil(p.EntryID)
+		attachID := refOrNil(p.SourceAttachmentID)
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO glossary_terms
+				(id, user_id, course_id, session_id, source_review_id,
+				 source_entry_id, source_attachment_id, source_session_ids,
+				 russian, chinese, explanation, part_of_speech, user_note,
+				 is_favorite, status,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+			        $9, $10, $11, $12, $13, $14, $15,
+			        1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID, sourceSessions,
+			*p.TermRussian, chinese, explanation, pos, note, favorite, status,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityTerm, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		// Delete-wins: deleted terms stay deleted.
+		res := conflict(item, obj.serverVer, obj.updatedAt, termRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, termRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge: non-empty incoming text wins (user-edited explanations are
+	// never silently cleared by a stale push); refs follow the sentinel.
+	chinese, explanation, pos, note := obj.chinese, obj.explanation, obj.partOfSpeech, obj.userNote
+	if p.TermChinese != nil && *p.TermChinese != "" {
+		chinese = *p.TermChinese
+	}
+	if p.TermExplanation != nil && *p.TermExplanation != "" {
+		explanation = *p.TermExplanation
+	}
+	if p.TermPartOfSpeech != nil && *p.TermPartOfSpeech != "" {
+		pos = *p.TermPartOfSpeech
+	}
+	if p.TermUserNote != nil && *p.TermUserNote != "" {
+		note = *p.TermUserNote
+	}
+	russian := obj.russian
+	if *p.TermRussian != "" {
+		russian = *p.TermRussian
+	}
+	sourceSessions := obj.sourceSessIDs
+	if p.TermSourceSessions != nil {
+		sourceSessions = *p.TermSourceSessions
+	}
+	favorite := obj.favorite
+	if p.TermFavorite != nil {
+		favorite = *p.TermFavorite
+	}
+	status := obj.status
+	if p.TermStatus != nil && *p.TermStatus != "" {
+		status = *p.TermStatus
+	}
+	courseID := mergeRef(obj.courseID, p.CourseID)
+	sessionID := mergeRef(obj.sessionID, p.SessionID)
+	reviewID := mergeRef(obj.sourceReview, p.SourceReviewID)
+	entryID := mergeRef(obj.sourceEntry, p.EntryID)
+	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE glossary_terms
+		SET course_id = $3, session_id = $4, source_review_id = $5,
+		    source_entry_id = $6, source_attachment_id = $7, source_session_ids = $8,
+		    russian = $9, chinese = $10, explanation = $11, part_of_speech = $12,
+		    user_note = $13, is_favorite = $14, status = $15,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID, sourceSessions,
+		russian, chinese, explanation, pos, note, favorite, status,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityTerm, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// applyStudyCard: flashcard content + spaced-repetition state. Content
+// fields merge like term text (non-empty incoming wins). Review-state
+// fields (stage/reviewCount/intervalHours/dueAt/lastReviewedAt/lastGrade)
+// have their own rule: the side with the NEWER lastReviewedAt wins for
+// all of them, so a device that reviewed later never has its schedule
+// clobbered by one that reviewed earlier. An incoming state without
+// lastReviewedAt (a pure content edit) never touches the schedule.
+func (s *Service) applyStudyCard(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchStudyCard(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		return s.applyLearningDelete(ctx, q, userID, item, EntityStudyCard, "study_cards",
+			obj != nil, obj != nil && obj.deletedAt != nil, cardRowView(obj))
+	}
+
+	// upsert: front must be present (the card's face is its identity).
+	if p.CardFront == nil || *p.CardFront == "" {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		back, cardType, note, origin, stage := "", "qa", "", "manual", "new"
+		var reviewCount, intervalHours int
+		var dueAt, lastReviewed *time.Time
+		lastGrade := ""
+		if p.CardBack != nil {
+			back = *p.CardBack
+		}
+		if p.CardType != nil && *p.CardType != "" {
+			cardType = *p.CardType
+		}
+		if p.CardUserNote != nil {
+			note = *p.CardUserNote
+		}
+		if p.CardOrigin != nil && *p.CardOrigin != "" {
+			origin = *p.CardOrigin
+		}
+		if p.CardStage != nil && *p.CardStage != "" {
+			stage = *p.CardStage
+		}
+		if p.CardReviewCount != nil {
+			reviewCount = *p.CardReviewCount
+		}
+		if p.CardIntervalHours != nil {
+			intervalHours = *p.CardIntervalHours
+		}
+		if p.CardDueAt != nil {
+			dueAt = p.CardDueAt
+		}
+		if p.CardLastReviewedAt != nil {
+			lastReviewed = p.CardLastReviewedAt
+		}
+		if p.CardLastGrade != nil {
+			lastGrade = *p.CardLastGrade
+		}
+		courseID := refOrNil(p.CourseID)
+		sessionID := refOrNil(p.SessionID)
+		entryID := refOrNil(p.EntryID)
+		attachID := refOrNil(p.SourceAttachmentID)
+		termID := refOrNil(p.SourceTermID)
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO study_cards
+				(id, user_id, course_id, session_id, source_entry_id,
+				 source_attachment_id, source_term_id,
+				 front, back, card_type, user_note, origin,
+				 stage, review_count, interval_hours, due_at, last_reviewed_at, last_grade,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7,
+			        $8, $9, $10, $11, $12,
+			        $13, $14, $15, $16, $17, $18,
+			        1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, courseID, sessionID, entryID, attachID, termID,
+			*p.CardFront, back, cardType, note, origin,
+			stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityStudyCard, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyCardRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyCardRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Content merge.
+	back, cardType, note := obj.back, obj.cardType, obj.userNote
+	if p.CardBack != nil && *p.CardBack != "" {
+		back = *p.CardBack
+	}
+	if p.CardType != nil && *p.CardType != "" {
+		cardType = *p.CardType
+	}
+	if p.CardUserNote != nil && *p.CardUserNote != "" {
+		note = *p.CardUserNote
+	}
+	front := obj.front
+	if *p.CardFront != "" {
+		front = *p.CardFront
+	}
+	courseID := mergeRef(obj.courseID, p.CourseID)
+	sessionID := mergeRef(obj.sessionID, p.SessionID)
+	entryID := mergeRef(obj.sourceEntry, p.EntryID)
+	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
+	termID := mergeRef(obj.sourceTerm, p.SourceTermID)
+
+	// Review-state merge: newer lastReviewedAt wins wholesale.
+	stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade :=
+		obj.stage, obj.reviewCount, obj.intervalHours, obj.dueAt, obj.lastReviewed, obj.lastGrade
+	if p.CardLastReviewedAt != nil &&
+		(lastReviewed == nil || !p.CardLastReviewedAt.Before(*lastReviewed)) {
+		if p.CardStage != nil && *p.CardStage != "" {
+			stage = *p.CardStage
+		}
+		if p.CardReviewCount != nil {
+			reviewCount = *p.CardReviewCount
+		}
+		if p.CardIntervalHours != nil {
+			intervalHours = *p.CardIntervalHours
+		}
+		dueAt = p.CardDueAt
+		lastReviewed = p.CardLastReviewedAt
+		if p.CardLastGrade != nil {
+			lastGrade = *p.CardLastGrade
+		}
+	}
+	// A pure content edit (no review timestamps) resets nothing — the
+	// stored schedule stands. A stale review (older lastReviewedAt) is
+	// ignored: the local device keeps the newer schedule.
+
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE study_cards
+		SET course_id = $3, session_id = $4, source_entry_id = $5,
+		    source_attachment_id = $6, source_term_id = $7,
+		    front = $8, back = $9, card_type = $10, user_note = $11,
+		    stage = $12, review_count = $13, interval_hours = $14,
+		    due_at = $15, last_reviewed_at = $16, last_grade = $17,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, courseID, sessionID, entryID, attachID, termID,
+		front, back, cardType, note,
+		stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityStudyCard, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// applyStudyTask: assignment/todo. Title rides the shared payload field.
+// Status merges with a sticky-done rule: once a task is completed, an
+// incoming non-done status cannot resurrect it server-side — a stale
+// device must go through the conflict path to reopen a task. Uncertainty
+// and origin are AI-provenance metadata (non-empty wins); completed_at
+// follows the status.
+func (s *Service) applyStudyTask(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchStudyTask(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		return s.applyLearningDelete(ctx, q, userID, item, EntityStudyTask, "study_tasks",
+			obj != nil, obj != nil && obj.deletedAt != nil, taskRowView(obj))
+	}
+
+	// upsert: the title is required.
+	title := ""
+	if p.Title != nil {
+		title = *p.Title
+	}
+	if title == "" {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		detail, priority, status, origin, uncertainty, note := "", "normal", "pending", "manual", "", ""
+		var dueAt, completedAt *time.Time
+		if p.TaskDetail != nil {
+			detail = *p.TaskDetail
+		}
+		if p.TaskDueAt != nil {
+			dueAt = p.TaskDueAt
+		}
+		if p.TaskPriority != nil && *p.TaskPriority != "" {
+			priority = *p.TaskPriority
+		}
+		if p.TaskStatus != nil && *p.TaskStatus != "" {
+			status = *p.TaskStatus
+		}
+		if p.TaskOrigin != nil && *p.TaskOrigin != "" {
+			origin = *p.TaskOrigin
+		}
+		if p.TaskUncertainty != nil {
+			uncertainty = *p.TaskUncertainty
+		}
+		if p.TaskUserNote != nil {
+			note = *p.TaskUserNote
+		}
+		if p.TaskCompletedAt != nil {
+			completedAt = p.TaskCompletedAt
+		}
+		courseID := refOrNil(p.CourseID)
+		sessionID := refOrNil(p.SessionID)
+		reviewID := refOrNil(p.SourceReviewID)
+		entryID := refOrNil(p.EntryID)
+		attachID := refOrNil(p.SourceAttachmentID)
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO study_tasks
+				(id, user_id, course_id, session_id, source_review_id,
+				 source_entry_id, source_attachment_id,
+				 title, detail, due_at, priority, status, origin,
+				 uncertainty, user_note, completed_at,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7,
+			        $8, $9, $10, $11, $12, $13,
+			        $14, $15, $16,
+			        1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+			title, detail, dueAt, priority, status, origin,
+			uncertainty, note, completedAt,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityStudyTask, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyTaskRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyTaskRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Content merge.
+	detail, note := obj.detail, obj.userNote
+	if p.TaskDetail != nil && *p.TaskDetail != "" {
+		detail = *p.TaskDetail
+	}
+	if p.TaskUserNote != nil && *p.TaskUserNote != "" {
+		note = *p.TaskUserNote
+	}
+	// title was validated non-empty above.
+	priority, origin, uncertainty := obj.priority, obj.origin, obj.uncertainty
+	if p.TaskPriority != nil && *p.TaskPriority != "" {
+		priority = *p.TaskPriority
+	}
+	if p.TaskOrigin != nil && *p.TaskOrigin != "" {
+		origin = *p.TaskOrigin
+	}
+	if p.TaskUncertainty != nil && *p.TaskUncertainty != "" {
+		uncertainty = *p.TaskUncertainty
+	}
+	dueAt := obj.dueAt
+	if p.TaskDueAt != nil {
+		dueAt = p.TaskDueAt
+	}
+	courseID := mergeRef(obj.courseID, p.CourseID)
+	sessionID := mergeRef(obj.sessionID, p.SessionID)
+	reviewID := mergeRef(obj.sourceReview, p.SourceReviewID)
+	entryID := mergeRef(obj.sourceEntry, p.EntryID)
+	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
+
+	// Status merge with sticky-done.
+	status := obj.status
+	completedAt := obj.completedAt
+	if p.TaskStatus != nil && *p.TaskStatus != "" && *p.TaskStatus != obj.status {
+		if obj.status == "done" && *p.TaskStatus != "done" {
+			// Sticky done: a stale device cannot reopen a completed task
+			// through the merge path (it conflicts first anyway); keep
+			// done + completed_at.
+		} else {
+			status = *p.TaskStatus
+			if status == "done" {
+				if p.TaskCompletedAt != nil {
+					completedAt = p.TaskCompletedAt
+				} else if completedAt == nil {
+					now := time.Now()
+					completedAt = &now
+				}
+			} else {
+				completedAt = nil
+			}
+		}
+	}
+
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE study_tasks
+		SET course_id = $3, session_id = $4, source_review_id = $5,
+		    source_entry_id = $6, source_attachment_id = $7,
+		    title = $8, detail = $9, due_at = $10, priority = $11,
+		    status = $12, origin = $13, uncertainty = $14, user_note = $15,
+		    completed_at = $16,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+		title, detail, dueAt, priority, status, origin, uncertainty, note,
+		completedAt,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityStudyTask, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// learningRowView is the minimal projection applyLearningDelete needs
+// from a fetched row (nil-safe: every helper below accepts a nil row).
+type learningRowView struct {
+	serverVer int
+	updatedAt time.Time
+}
+
+func termRowView(t *termRow) learningRowView {
+	if t == nil {
+		return learningRowView{}
+	}
+	return learningRowView{serverVer: t.serverVer, updatedAt: t.updatedAt}
+}
+
+func cardRowView(c *studyCardRow) learningRowView {
+	if c == nil {
+		return learningRowView{}
+	}
+	return learningRowView{serverVer: c.serverVer, updatedAt: c.updatedAt}
+}
+
+func taskRowView(t *studyTaskRow) learningRowView {
+	if t == nil {
+		return learningRowView{}
+	}
+	return learningRowView{serverVer: t.serverVer, updatedAt: t.updatedAt}
+}
+
+// applyLearningDelete handles the delete path shared by the learning
+// entities (term/card/task): a phantom tombstone for a row the server
+// has never seen (all non-key columns carry defaults, so a stub insert
+// works), an idempotent re-delete of an already-tombstoned row, and the
+// live delete (bump version, log change). Sessions and courses are NOT
+// cascaded here — learning material survives its sources; course deletes
+// clear the reference instead (detachCourseFromStudyData).
+func (s *Service) applyLearningDelete(
+	ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem,
+	entity, table string, exists, deleted bool, row learningRowView,
+) (*PushItemResult, error) {
+	if !exists {
+		// Phantom tombstone: never existed server-side; record the delete
+		// so offline devices learn about it.
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO `+table+`
+				(id, user_id, server_version, created_at, updated_at, deleted_at)
+			VALUES ($1, $2, 1, now(), now(), now())
+			RETURNING updated_at`, item.EntityID, userID,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, entity, item.EntityID, "delete", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if deleted {
+		res := accepted(item, row.serverVer, row.updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	var version int
+	var updatedAt time.Time
+	err := q.QueryRow(ctx, `
+		UPDATE `+table+`
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`, item.EntityID, userID,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, entity, item.EntityID, "delete", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // --- Pull -------------------------------------------------------------------------
 
 func (s *Service) Pull(ctx context.Context, userID uuid.UUID, cursor int64, limit int) (*PullResponse, error) {
@@ -2438,6 +3368,24 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return attachmentRecordJSON(obj), nil
+	case EntityTerm:
+		obj, err := fetchTerm(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return termRecordJSON(obj), nil
+	case EntityStudyCard:
+		obj, err := fetchStudyCard(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyCardRecordJSON(obj), nil
+	case EntityStudyTask:
+		obj, err := fetchStudyTask(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyTaskRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -2446,7 +3394,7 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
-	var tail, sessions, entries, courses, notes, reviews, attachments int
+	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -2455,8 +3403,11 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM courses WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM session_notes WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_reviews WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM session_attachments WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments)
+			(SELECT count(*) FROM session_attachments WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM glossary_terms WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_cards WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_tasks WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks)
 	if err != nil {
 		return nil, err
 	}
@@ -2471,6 +3422,9 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		NoteCount:              notes,
 		ReviewCount:            reviews,
 		AttachmentCount:        attachments,
+		TermCount:              terms,
+		StudyCardCount:         cards,
+		StudyTaskCount:         tasks,
 		PendingCount:           0,
 		ServerTime:             time.Now(),
 	}, nil

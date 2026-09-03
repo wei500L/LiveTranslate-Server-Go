@@ -113,6 +113,44 @@ type PushPayload struct {
 	AttachmentCapturedAt *time.Time `json:"attachmentCapturedAt"`
 	AttachmentCaption    *string    `json:"attachmentCaption"`
 	AttachmentSortIndex  *int       `json:"attachmentSortIndex"`
+	// Learning entities (review center): shared reference fields ride
+	// sessionId/courseId/entryId plus the sourceAttachmentId/sourceReviewId/
+	// sourceTermId fields below; task title rides Title (course/attachment
+	// convention). termSourceSessions is a JSON array of session UUID
+	// strings (the term's accumulated classroom sources) — string-in
+	// convention, same as analysis/reviewContent.
+	TermRussian        *string    `json:"termRussian"`
+	TermChinese        *string    `json:"termChinese"`
+	TermExplanation    *string    `json:"termExplanation"`
+	TermPartOfSpeech   *string    `json:"termPartOfSpeech"`
+	TermUserNote       *string    `json:"termUserNote"`
+	TermSourceSessions *string    `json:"termSourceSessions"`
+	TermFavorite       *bool      `json:"termFavorite"`
+	TermStatus         *string    `json:"termStatus"`
+	CardFront          *string    `json:"cardFront"`
+	CardBack           *string    `json:"cardBack"`
+	CardType           *string    `json:"cardType"`
+	CardUserNote       *string    `json:"cardUserNote"`
+	CardOrigin         *string    `json:"cardOrigin"`
+	CardStage          *string    `json:"cardStage"`
+	CardReviewCount    *int       `json:"cardReviewCount"`
+	CardIntervalHours  *int       `json:"cardIntervalHours"`
+	CardDueAt          *time.Time `json:"cardDueAt"`
+	CardLastReviewedAt *time.Time `json:"cardLastReviewedAt"`
+	CardLastGrade      *string    `json:"cardLastGrade"`
+	TaskDetail         *string    `json:"taskDetail"`
+	TaskDueAt          *time.Time `json:"taskDueAt"`
+	TaskPriority       *string    `json:"taskPriority"`
+	TaskStatus         *string    `json:"taskStatus"`
+	TaskOrigin         *string    `json:"taskOrigin"`
+	TaskUncertainty    *string    `json:"taskUncertainty"`
+	TaskUserNote       *string    `json:"taskUserNote"`
+	TaskCompletedAt    *time.Time `json:"taskCompletedAt"`
+	// Shared source references for the learning entities (term/card/task).
+	// Absent (nil) keeps the stored value; uuid.Nil explicitly CLEARS it.
+	SourceAttachmentID *uuid.UUID `json:"sourceAttachmentId"`
+	SourceReviewID     *uuid.UUID `json:"sourceReviewId"`
+	SourceTermID       *uuid.UUID `json:"sourceTermId"`
 	// attachmentTransform is the non-destructive display transform
 	// (rotation + normalized crop) as a JSON string. Absent = keep; the
 	// original file bytes are never modified server-side.
@@ -182,6 +220,9 @@ type SyncStatusResponse struct {
 	NoteCount              int       `json:"noteCount"`
 	ReviewCount            int       `json:"reviewCount"`
 	AttachmentCount        int       `json:"attachmentCount"`
+	TermCount              int       `json:"termCount"`
+	StudyCardCount         int       `json:"studyCardCount"`
+	StudyTaskCount         int       `json:"studyTaskCount"`
 	PendingCount           int       `json:"pendingCount"`
 	ServerTime             time.Time `json:"serverTime"`
 }
@@ -197,13 +238,17 @@ const (
 	EntityNote        = "note"
 	EntityStudyReview = "study_review"
 	EntityAttachment  = "attachment"
+	EntityTerm        = "term"
+	EntityStudyCard   = "study_card"
+	EntityStudyTask   = "study_task"
 )
 
 func validEntityType(t string) bool {
 	return t == EntitySession || t == EntityEntry ||
 		t == EntityBookmark || t == EntityFavorite ||
 		t == EntityCourse || t == EntityNote ||
-		t == EntityStudyReview || t == EntityAttachment
+		t == EntityStudyReview || t == EntityAttachment ||
+		t == EntityTerm || t == EntityStudyCard || t == EntityStudyTask
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -322,4 +367,72 @@ type attachmentRecord struct {
 	OcrText       string    `json:"attachmentOcrText,omitempty"`
 	ServerVersion int       `json:"serverVersion"`
 	Deleted       bool      `json:"deleted"`
+}
+
+type termRecord struct {
+	EntityType string `json:"entityType"`
+	ID         string `json:"id"`
+	// Nil omits the key (no source / unscoped), matching session/note.
+	CourseID      *string `json:"courseId,omitempty"`
+	SessionID     *string `json:"sessionId,omitempty"`
+	SourceReview  *string `json:"sourceReviewId,omitempty"`
+	SourceEntry   *string `json:"sourceEntryId,omitempty"`
+	SourceAttach  *string `json:"sourceAttachmentId,omitempty"`
+	SourceSessIDs string  `json:"termSourceSessions,omitempty"`
+	// Field names mirror the push payload so iOS decodes records and
+	// conflict payloads with the same CodingKeys.
+	Russian       string `json:"termRussian"`
+	Chinese       string `json:"termChinese"`
+	Explanation   string `json:"termExplanation"`
+	PartOfSpeech  string `json:"termPartOfSpeech"`
+	UserNote      string `json:"termUserNote"`
+	Favorite      bool   `json:"termFavorite"`
+	Status        string `json:"termStatus"`
+	ServerVersion int    `json:"serverVersion"`
+	Deleted       bool   `json:"deleted"`
+}
+
+type studyCardRecord struct {
+	EntityType    string     `json:"entityType"`
+	ID            string     `json:"id"`
+	CourseID      *string    `json:"courseId,omitempty"`
+	SessionID     *string    `json:"sessionId,omitempty"`
+	SourceEntry   *string    `json:"sourceEntryId,omitempty"`
+	SourceAttach  *string    `json:"sourceAttachmentId,omitempty"`
+	SourceTerm    *string    `json:"sourceTermId,omitempty"`
+	Front         string     `json:"cardFront"`
+	Back          string     `json:"cardBack"`
+	CardType      string     `json:"cardType"`
+	UserNote      string     `json:"cardUserNote"`
+	Origin        string     `json:"cardOrigin"`
+	Stage         string     `json:"cardStage"`
+	ReviewCount   int        `json:"cardReviewCount"`
+	IntervalHrs   int        `json:"cardIntervalHours"`
+	DueAt         *time.Time `json:"cardDueAt,omitempty"`
+	LastReviewed  *time.Time `json:"cardLastReviewedAt,omitempty"`
+	LastGrade     string     `json:"cardLastGrade"`
+	ServerVersion int        `json:"serverVersion"`
+	Deleted       bool       `json:"deleted"`
+}
+
+type studyTaskRecord struct {
+	EntityType string `json:"entityType"`
+	ID         string `json:"id"`
+	// Title rides the shared "title" key (course/attachment convention).
+	Title         string     `json:"title"`
+	CourseID      *string    `json:"courseId,omitempty"`
+	SessionID     *string    `json:"sessionId,omitempty"`
+	SourceReview  *string    `json:"sourceReviewId,omitempty"`
+	SourceEntry   *string    `json:"sourceEntryId,omitempty"`
+	SourceAttach  *string    `json:"sourceAttachmentId,omitempty"`
+	Detail        string     `json:"taskDetail"`
+	DueAt         *time.Time `json:"taskDueAt,omitempty"`
+	Priority      string     `json:"taskPriority"`
+	Status        string     `json:"taskStatus"`
+	Origin        string     `json:"taskOrigin"`
+	Uncertainty   string     `json:"taskUncertainty"`
+	UserNote      string     `json:"taskUserNote"`
+	CompletedAt   *time.Time `json:"taskCompletedAt,omitempty"`
+	ServerVersion int        `json:"serverVersion"`
+	Deleted       bool       `json:"deleted"`
 }

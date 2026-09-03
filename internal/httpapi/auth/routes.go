@@ -252,7 +252,7 @@ func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	devices, err := h.auth.ListDevices(r.Context(), ac.User.ID)
+	devices, err := h.auth.ListDevices(r.Context(), ac.User.ID, ac.Device)
 	if err != nil {
 		httpapi.WriteDetail(w, http.StatusInternalServerError, "internal server error")
 		return

@@ -858,9 +858,10 @@ type DeviceInfoDTO struct {
 	AppVersion string     `json:"appVersion"`
 	LastSeenAt time.Time  `json:"lastSeenAt"`
 	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+	Current    bool       `json:"current"`
 }
 
-func (s *Service) ListDevices(ctx context.Context, userID uuid.UUID) ([]*DeviceInfoDTO, error) {
+func (s *Service) ListDevices(ctx context.Context, userID, currentDeviceID uuid.UUID) ([]*DeviceInfoDTO, error) {
 	devs, err := store.ListUserDevices(ctx, s.db.Q(), userID)
 	if err != nil {
 		return nil, err
@@ -870,6 +871,7 @@ func (s *Service) ListDevices(ctx context.Context, userID uuid.UUID) ([]*DeviceI
 		out = append(out, &DeviceInfoDTO{
 			DeviceID: d.ID.String(), Name: d.DisplayName, AppVersion: d.AppVersion,
 			LastSeenAt: d.LastSeenAt, RevokedAt: d.RevokedAt,
+			Current: d.ID == currentDeviceID,
 		})
 	}
 	return out, nil

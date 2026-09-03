@@ -1,0 +1,23 @@
+{{template "head" .}}
+<div class="card">
+  <h1>概览</h1>
+  <p class="muted">最近 200 条审计事件。管理员无法查看任何课堂文本内容（俄语原文与中文译文）。</p>
+</div>
+<div class="card">
+  <h2>审计事件</h2>
+  <table>
+    <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标用户</th><th>说明</th></tr>
+    {{range .Data}}
+    <tr>
+      <td class="muted">{{fmtTime .CreatedAt}}</td>
+      <td>{{.ActorType}}</td>
+      <td><code>{{.Action}}</code></td>
+      <td class="muted">{{if .TargetUserID}}{{.TargetUserID}}{{else}}—{{end}}</td>
+      <td>{{.Reason}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="5" class="muted">暂无事件</td></tr>
+    {{end}}
+  </table>
+</div>
+{{template "foot" .}}

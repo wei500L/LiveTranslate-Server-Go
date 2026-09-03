@@ -1,0 +1,37 @@
+{{template "head" .}}
+<div class="card">
+  <h1>邀请码</h1>
+  <p class="muted">注册开放邀请制（REQUIRE_INVITATION）时使用。邀请码仅用于注册门槛，不含任何权限。</p>
+  <form method="post" action="/invitations" class="row">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="text" name="note" placeholder="备注（发给谁 / 用途）">
+    <input type="number" name="max_uses" value="1" min="1" max="100" style="max-width:120px" title="可用次数">
+    <button type="submit">创建（14 天有效）</button>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <tr><th>邀请码</th><th>备注</th><th>使用</th><th>过期</th><th>状态</th><th></th></tr>
+    {{range .Data}}
+    <tr>
+      <td><code>{{.Code}}</code></td>
+      <td>{{.Note}}</td>
+      <td>{{.UsedCount}} / {{.MaxUses}}</td>
+      <td class="muted">{{fmtTimePtr .ExpiresAt}}</td>
+      <td>{{if .RevokedAt}}<span class="pill deleted">已吊销</span>{{else}}<span class="pill active">有效</span>{{end}}</td>
+      <td>
+        {{if not .RevokedAt}}
+        <form class="inline" method="post" action="/invitations/revoke">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="code" value="{{.Code}}">
+          <button type="submit" class="danger">吊销</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="muted">还没有邀请码</td></tr>
+    {{end}}
+  </table>
+</div>
+{{template "foot" .}}

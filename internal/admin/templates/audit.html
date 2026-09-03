@@ -1,0 +1,21 @@
+{{template "head" .}}
+<div class="card">
+  <h1>审计日志</h1>
+  <p class="muted">最近 200 条。IP 与邮箱均以哈希存储，日志不含密码、验证码、token 或课堂文本。</p>
+  <table>
+    <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标用户</th><th>说明</th><th>IP 哈希</th></tr>
+    {{range .Data}}
+    <tr>
+      <td class="muted">{{fmtTime .CreatedAt}}</td>
+      <td>{{.ActorType}}</td>
+      <td><code>{{.Action}}</code></td>
+      <td class="muted">{{if .TargetUserID}}{{.TargetUserID}}{{else}}—{{end}}</td>
+      <td>{{.Reason}}</td>
+      <td class="muted">{{printf "%.12s" .IPHash}}…</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="muted">暂无事件</td></tr>
+    {{end}}
+  </table>
+</div>
+{{template "foot" .}}

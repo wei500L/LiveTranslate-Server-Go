@@ -1,0 +1,10 @@
+# binaries
+/livetranslate-server
+/tmp/
+*.test
+
+# local env — never commit secrets
+.env
+
+# editors / OS
+.DS_Store

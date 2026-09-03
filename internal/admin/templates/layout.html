@@ -1,0 +1,59 @@
+{{define "head"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+:root { --bg:#f5f6f8; --card:#fff; --ink:#1c2733; --muted:#68778a; --line:#e3e7ee;
+        --brand:#2b5fd9; --danger:#c0392b; --ok:#1e7e4e; }
+* { box-sizing:border-box; }
+body { margin:0; font:15px/1.55 -apple-system,"PingFang SC","Segoe UI",sans-serif;
+       background:var(--bg); color:var(--ink); }
+a { color:var(--brand); text-decoration:none; }
+.topbar { background:#1c2733; color:#fff; padding:10px 20px; display:flex; gap:18px; align-items:center; }
+.topbar a { color:#cdd9ee; }
+.topbar .brand { font-weight:700; color:#fff; margin-right:8px; }
+.wrap { max-width:960px; margin:24px auto; padding:0 16px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px; margin-bottom:16px; }
+h1 { font-size:20px; margin:0 0 14px; } h2 { font-size:16px; margin:18px 0 8px; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.pill { display:inline-block; padding:1px 9px; border-radius:99px; font-size:12px; }
+.pill.active { background:#e3f3ea; color:var(--ok); }
+.pill.pending { background:#fdf3e0; color:#9a6b0f; }
+.pill.suspended { background:#fbe6e2; color:var(--danger); }
+.pill.deleted { background:#eceff3; color:var(--muted); }
+.muted { color:var(--muted); }
+input, button { font:inherit; }
+input[type=text], input[type=password], input[type=number] {
+  width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:7px; }
+button { background:var(--brand); color:#fff; border:0; border-radius:7px; padding:8px 16px; cursor:pointer; }
+button.danger { background:var(--danger); }
+form.inline { display:inline; }
+.row { display:flex; gap:10px; } .row > * { flex:1; }
+.error-box { background:#fbe6e2; color:var(--danger); border-radius:8px; padding:10px 14px; margin-bottom:14px; }
+.flash-box { background:#e3f3ea; color:var(--ok); border-radius:8px; padding:10px 14px; margin-bottom:14px; }
+code { background:#eef1f6; padding:1px 6px; border-radius:5px; }
+</style>
+</head>
+<body>
+{{if .Admin}}
+<nav class="topbar">
+  <span class="brand">LiveTranslate Admin</span>
+  <a href="/">概览</a><a href="/users">用户</a><a href="/invitations">邀请码</a><a href="/audit">审计日志</a>
+  <form class="inline" method="post" action="/logout" style="margin-left:auto">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" style="background:transparent;border:1px solid #4a5b70;padding:4px 12px">退出</button>
+  </form>
+</nav>
+{{end}}
+<div class="wrap">
+{{if .Error}}<div class="error-box">{{.Error}}</div>{{end}}
+{{if .Flash}}<div class="flash-box">{{.Flash}}</div>{{end}}
+{{end}}
+
+{{define "foot"}}
+</div></body></html>
+{{end}}

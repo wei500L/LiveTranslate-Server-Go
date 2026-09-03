@@ -1,0 +1,67 @@
+# LiveTranslate sync server (Go) — local/dev compose.
+#
+# Production notes (README.md §Deployment):
+#   - run behind Caddy/Nginx with automatic HTTPS;
+#   - set JWT_SECRET / POSTGRES_PASSWORD to strong generated values;
+#   - keep DEV_LOGIN_ENABLED=false;
+#   - do NOT publish the postgres port to the internet;
+#   - the admin UI is a SEPARATE listener — keep it on an internal port or
+#     behind an additional access control (IP allowlist / VPN).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livetranslate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-livetranslate}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Internal only. One-off psql: `docker compose exec db psql -U livetranslate`
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livetranslate}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-livetranslate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-livetranslate}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      APPLE_BUNDLE_ID: ${APPLE_BUNDLE_ID:-com.livetranslate.ios}
+      # DEV LOGIN: local development against the iOS Debug build only.
+      DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-false}
+      TOMBSTONE_RETENTION_DAYS: ${TOMBSTONE_RETENTION_DAYS:-180}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    ports:
+      # In production remove this mapping and proxy via Caddy/Nginx.
+      - "8000:8000"
+
+  # Admin web UI on its own listener. Create the first admin with:
+  #   docker compose run --rm admin livetranslate-server create-admin
+  admin:
+    build: .
+    restart: unless-stopped
+    command: ["livetranslate-server", "admin"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-livetranslate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-livetranslate}
+      ADMIN_LISTEN_ADDR: 0.0.0.0:8081
+      DEV_MODE: "false"
+    ports:
+      # Keep OFF the public internet in production; front with Caddy +
+      # IP allowlist (deploy/Caddyfile.example) or an internal tunnel.
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  pgdata:

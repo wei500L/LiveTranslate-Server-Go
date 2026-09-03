@@ -1,0 +1,66 @@
+{{template "head" .}}
+<div class="card">
+  <h1>用户详情</h1>
+  <table>
+    <tr><th>ID</th><td><code>{{.Data.ID}}</code></td></tr>
+    <tr><th>邮箱</th><td>{{fmtEmailPtr .Data.Email}}</td></tr>
+    <tr><th>显示名</th><td>{{.Data.DisplayName}}</td></tr>
+    <tr><th>状态</th><td><span class="pill {{.Data.Status}}">{{.Data.Status}}</span></td></tr>
+    <tr><th>邮箱已验证</th><td>{{if .Data.EmailVerified}}是{{else}}否{{end}}</td></tr>
+    <tr><th>注册时间</th><td>{{fmtTime .Data.CreatedAt}}</td></tr>
+    <tr><th>最近登录</th><td>{{fmtTimePtr .Data.LastLoginAt}}</td></tr>
+    <tr><th>课堂条目数</th><td>{{.Data.EntryCount}}（管理员不可查看内容）</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>设备 / 会话</h2>
+  <table>
+    <tr><th>设备</th><th>App 版本</th><th>最近活跃</th><th>状态</th></tr>
+    {{range .Data.Devices}}
+    <tr>
+      <td>{{.DeviceName}}</td><td>{{.AppVersion}}</td>
+      <td class="muted">{{fmtTime .LastSeenAt}}</td>
+      <td>{{if .RevokedAt}}<span class="pill deleted">已吊销 {{fmtTimePtr .RevokedAt}}</span>{{else}}<span class="pill active">有效</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="muted">无设备</td></tr>
+    {{end}}
+  </table>
+</div>
+<div class="card">
+  <h2>操作</h2>
+  <p class="muted">所有操作都会写入审计日志。课堂内容与密码对管理员不可见；本系统不支持账号冒充。</p>
+
+  {{if eq .Data.Status "active"}}
+  <form method="post" action="/users/{{.Data.ID}}/suspend" class="row">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="text" name="reason" placeholder="停用原因（必填，写入审计日志）" required>
+    <button type="submit">停用账号</button>
+  </form>
+  {{end}}
+
+  {{if eq .Data.Status "suspended"}}
+  <form method="post" action="/users/{{.Data.ID}}/reactivate" class="row">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="text" name="reason" placeholder="恢复原因（写入审计日志）">
+    <button type="submit">恢复账号</button>
+  </form>
+  {{end}}
+
+  <form method="post" action="/users/{{.Data.ID}}/force-logout" class="row">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="text" name="reason" placeholder="强制下线原因（写入审计日志）">
+    <button type="submit">强制下线所有设备</button>
+  </form>
+
+  {{if not .Data.DeletedAt}}
+  <form method="post" action="/users/{{.Data.ID}}/delete" class="row"
+        onsubmit="return true">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="text" name="reason" placeholder="删除原因（写入审计日志）" required>
+    <input type="text" name="confirm" placeholder="输入 DELETE 确认" required pattern="DELETE">
+    <button type="submit" class="danger">删除账号（清除云端数据）</button>
+  </form>
+  {{end}}
+</div>
+{{template "foot" .}}

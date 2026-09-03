@@ -1,0 +1,1158 @@
+package sync
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"livetranslate/server/internal/config"
+	"livetranslate/server/internal/store"
+)
+
+// Service is the sync engine. All public methods take the resolved user ID;
+// every SQL statement filters on it (user isolation is structural).
+type Service struct {
+	cfg *config.Config
+	db  *store.DB
+}
+
+func NewService(cfg *config.Config, db *store.DB) *Service {
+	return &Service{cfg: cfg, db: db}
+}
+
+// --- Row readers ------------------------------------------------------------
+
+type sessionRow struct {
+	id        uuid.UUID
+	userID    uuid.UUID
+	title     string
+	startedAt time.Time
+	endedAt   *time.Time
+	duration  float64
+	srcLang   string
+	tgtLang   string
+	status    string
+	abnormal  bool
+	serverVer int
+	createdAt time.Time
+	updatedAt time.Time
+	deletedAt *time.Time
+}
+
+const sessionCols = `id, user_id, title, started_at, ended_at, duration,
+	source_language, target_language, session_status, abnormal_termination,
+	server_version, created_at, updated_at, deleted_at`
+
+func scanSession(r interface{ Scan(...any) error }) (*sessionRow, error) {
+	s := &sessionRow{}
+	err := r.Scan(&s.id, &s.userID, &s.title, &s.startedAt, &s.endedAt, &s.duration,
+		&s.srcLang, &s.tgtLang, &s.status, &s.abnormal, &s.serverVer,
+		&s.createdAt, &s.updatedAt, &s.deletedAt)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func fetchSession(ctx context.Context, q store.Q, userID, id uuid.UUID) (*sessionRow, error) {
+	r := q.QueryRow(ctx,
+		`SELECT `+sessionCols+` FROM classroom_sessions WHERE id = $1 AND user_id = $2`, id, userID)
+	s, err := scanSession(r)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return s, err
+}
+
+func sessionRecordJSON(s *sessionRow) json.RawMessage {
+	b, _ := json.Marshal(sessionRecord{
+		EntityType: EntitySession, ID: s.id.String(), Title: s.title,
+		StartedAt: &s.startedAt, EndedAt: s.endedAt, Duration: s.duration,
+		SessionStatus: s.status, AbnormalTermination: s.abnormal,
+		ServerVersion: s.serverVer, Deleted: s.deletedAt != nil,
+	})
+	return b
+}
+
+type entryRow struct {
+	id          uuid.UUID
+	sessionID   uuid.UUID
+	sequenceID  int
+	startOffset float64
+	endOffset   float64
+	russian     string
+	chinese     *string
+	status      string
+	serverVer   int
+	updatedAt   time.Time
+	deletedAt   *time.Time
+}
+
+func fetchEntry(ctx context.Context, q store.Q, userID, id uuid.UUID) (*entryRow, error) {
+	e := &entryRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, session_id, sequence_id, start_offset, end_offset,
+		       russian_text, chinese_text, translation_status, server_version,
+		       updated_at, deleted_at
+		FROM transcript_entries WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&e.id, &e.sessionID, &e.sequenceID, &e.startOffset, &e.endOffset,
+		&e.russian, &e.chinese, &e.status, &e.serverVer, &e.updatedAt, &e.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func entryRecordJSON(e *entryRow) json.RawMessage {
+	b, _ := json.Marshal(entryRecord{
+		EntityType: EntityEntry, ID: e.id.String(), SessionID: e.sessionID.String(),
+		SequenceID: e.sequenceID, StartOffset: e.startOffset, EndOffset: e.endOffset,
+		RussianText: e.russian, ChineseText: e.chinese, TranslationStatus: e.status,
+		ServerVersion: e.serverVer, Deleted: e.deletedAt != nil,
+	})
+	return b
+}
+
+type bookmarkRow struct {
+	id           uuid.UUID
+	sessionID    uuid.UUID
+	entryID      uuid.UUID
+	isBookmarked bool
+	serverVer    int
+	updatedAt    time.Time
+	deletedAt    *time.Time
+}
+
+func fetchBookmark(ctx context.Context, q store.Q, userID, id uuid.UUID) (*bookmarkRow, error) {
+	b := &bookmarkRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, session_id, entry_id, is_bookmarked, server_version, updated_at, deleted_at
+		FROM bookmarks WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&b.id, &b.sessionID, &b.entryID, &b.isBookmarked, &b.serverVer, &b.updatedAt, &b.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func bookmarkRecordJSON(b *bookmarkRow) json.RawMessage {
+	bs, _ := json.Marshal(bookmarkRecord{
+		EntityType: EntityBookmark, ID: b.id.String(), SessionID: b.sessionID.String(),
+		EntryID: b.entryID.String(), IsBookmarked: b.isBookmarked,
+		ServerVersion: b.serverVer, Deleted: b.deletedAt != nil,
+	})
+	return bs
+}
+
+type favoriteRow struct {
+	id         uuid.UUID
+	sessionID  uuid.UUID
+	isFavorite bool
+	serverVer  int
+	updatedAt  time.Time
+	deletedAt  *time.Time
+}
+
+func fetchFavorite(ctx context.Context, q store.Q, userID, id uuid.UUID) (*favoriteRow, error) {
+	f := &favoriteRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, session_id, is_favorite, server_version, updated_at, deleted_at
+		FROM favorite_sessions WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&f.id, &f.sessionID, &f.isFavorite, &f.serverVer, &f.updatedAt, &f.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func favoriteRecordJSON(f *favoriteRow) json.RawMessage {
+	b, _ := json.Marshal(favoriteRecord{
+		EntityType: EntityFavorite, ID: f.id.String(), SessionID: f.sessionID.String(),
+		IsFavorite: f.isFavorite, ServerVersion: f.serverVer, Deleted: f.deletedAt != nil,
+	})
+	return b
+}
+
+// --- Change log + ledger helpers ---------------------------------------------
+
+func logChange(ctx context.Context, q store.Q, userID uuid.UUID, entityType string, entityID uuid.UUID, operation string, serverVersion int) error {
+	_, err := q.Exec(ctx, `
+		INSERT INTO sync_changes (user_id, entity_type, entity_id, operation, server_version, created_at)
+		VALUES ($1, $2, $3, $4, $5, now())`, userID, entityType, entityID, operation, serverVersion)
+	return err
+}
+
+func storeLedger(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem, result *PushItemResult) error {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = q.Exec(ctx, `
+		INSERT INTO processed_operations (user_id, operation_id, entity_type, entity_id, result, created_at)
+		VALUES ($1, $2, $3, $4, $5, now())`, userID, item.OperationID, item.EntityType, item.EntityID, raw)
+	return err
+}
+
+func accepted(item *PushItem, version int, updatedAt time.Time) *PushItemResult {
+	return &PushItemResult{
+		OperationID: item.OperationID, Status: "accepted",
+		ServerVersion: &version, ServerUpdatedAt: &updatedAt,
+	}
+}
+
+func conflict(item *PushItem, version int, updatedAt time.Time, record json.RawMessage) *PushItemResult {
+	code := "stale_base_version"
+	return &PushItemResult{
+		OperationID: item.OperationID, Status: "conflict",
+		ServerVersion: &version, ServerUpdatedAt: &updatedAt,
+		ErrorCode: &code, ServerRecord: record,
+	}
+}
+
+func rejected(item *PushItem, code string) *PushItemResult {
+	return &PushItemResult{OperationID: item.OperationID, Status: "rejected", ErrorCode: &code}
+}
+
+// --- Push ---------------------------------------------------------------------
+
+// ApplyPush applies a whole batch in ONE transaction. Per item the
+// semantics are identical to the Python _apply_one:
+//
+//  1. ledger hit → replay the stored result verbatim;
+//  2. delete → tombstone (+cascade for sessions; phantom tombstones for
+//     never-seen entities); idempotent re-delete returns accepted;
+//  3. upsert → insert@v1 / base==ver merge / base<ver conflict / base>ver
+//     rejected; deleted rows conflict (delete-wins, no resurrection).
+func (s *Service) ApplyPush(ctx context.Context, userID uuid.UUID, items []PushItem) ([]PushItemResult, error) {
+	results := make([]PushItemResult, 0, len(items))
+	err := s.db.Tx(ctx, func(tx pgx.Tx) error {
+		q := store.TxQ(tx)
+		for i := range items {
+			res, err := s.applyOne(ctx, q, userID, &items[i])
+			if err != nil {
+				return fmt.Errorf("operation %s: %w", items[i].OperationID, err)
+			}
+			results = append(results, *res)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	// 1. Idempotency ledger.
+	var stored []byte
+	err := q.QueryRow(ctx, `
+		SELECT result FROM processed_operations
+		WHERE user_id = $1 AND operation_id = $2`, userID, item.OperationID,
+	).Scan(&stored)
+	if err == nil {
+		var res PushItemResult
+		if err := json.Unmarshal(stored, &res); err == nil {
+			return &res, nil
+		}
+		// Corrupt ledger row: fall through to re-processing (safe —
+		// deterministic UUIDs make the write idempotent at the row level).
+	} else if err != pgx.ErrNoRows {
+		return nil, err
+	}
+
+	// 2. Structural validation (permanent rejects).
+	if !validEntityType(item.EntityType) {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.Operation != "upsert" && item.Operation != "delete" {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	switch item.EntityType {
+	case EntitySession:
+		return s.applySession(ctx, q, userID, item)
+	case EntityEntry:
+		return s.applyEntry(ctx, q, userID, item)
+	case EntityBookmark:
+		return s.applyBookmark(ctx, q, userID, item)
+	default:
+		return s.applyFavorite(ctx, q, userID, item)
+	}
+}
+
+// --- Session ------------------------------------------------------------------
+
+func (s *Service) applySession(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchSession(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+
+	if item.Operation == "delete" {
+		if obj == nil {
+			// Phantom tombstone: never existed server-side; record the
+			// delete so offline devices learn about it.
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO classroom_sessions
+					(id, user_id, title, started_at, session_status, server_version, created_at, updated_at, deleted_at)
+				VALUES ($1, $2, '', $3, 'finished', 1, now(), now(), now())
+				RETURNING updated_at`, item.EntityID, userID, item.ClientUpdatedAt,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntitySession, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj.deletedAt != nil {
+			res := accepted(item, obj.serverVer, obj.updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var version int
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			UPDATE classroom_sessions
+			SET deleted_at = now(), session_status = 'finished',
+			    server_version = server_version + 1, updated_at = now()
+			WHERE id = $1 AND user_id = $2
+			RETURNING server_version, updated_at`, item.EntityID, userID,
+		).Scan(&version, &updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntitySession, item.EntityID, "delete", version); err != nil {
+			return nil, err
+		}
+		if err := s.cascadeDeleteChildren(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
+		res := accepted(item, version, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// upsert
+	p := item.Payload
+	if obj == nil {
+		if p.StartedAt == nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		title := ""
+		if p.Title != nil {
+			title = *p.Title
+		}
+		duration := 0.0
+		if p.Duration != nil {
+			duration = *p.Duration
+		}
+		src, tgt := "ru", "zh-CN"
+		if p.SourceLanguage != nil {
+			src = *p.SourceLanguage
+		}
+		if p.TargetLanguage != nil {
+			tgt = *p.TargetLanguage
+		}
+		status := "active"
+		if p.SessionStatus != nil {
+			status = *p.SessionStatus
+		}
+		abnormal := false
+		if p.AbnormalTermination != nil {
+			abnormal = *p.AbnormalTermination
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO classroom_sessions
+				(id, user_id, title, started_at, ended_at, duration, source_language,
+				 target_language, session_status, abnormal_termination, server_version,
+				 created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, title, *p.StartedAt, p.EndedAt, duration,
+			src, tgt, status, abnormal,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntitySession, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		// Delete-wins: deleted sessions stay deleted.
+		res := conflict(item, obj.serverVer, obj.updatedAt, sessionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, sessionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge (field rules identical to Python merge_record for sessions):
+	// non-null incoming fields overwrite; abnormal termination ORs.
+	title, endedAt, duration, status, abnormal := obj.title, obj.endedAt, obj.duration, obj.status, obj.abnormal
+	if p.Title != nil {
+		title = *p.Title
+	}
+	if p.EndedAt != nil {
+		endedAt = p.EndedAt
+	}
+	if p.Duration != nil {
+		duration = *p.Duration
+	}
+	if p.SessionStatus != nil {
+		status = *p.SessionStatus
+	}
+	if p.AbnormalTermination != nil {
+		abnormal = abnormal || *p.AbnormalTermination
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE classroom_sessions
+		SET title = $3, ended_at = $4, duration = $5, session_status = $6,
+		    abnormal_termination = $7,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, title, endedAt, duration, status, abnormal,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntitySession, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// cascadeDeleteChildren tombstones the session's live entries, bookmarks
+// and favorites, bumping each version and emitting a delete change.
+func (s *Service) cascadeDeleteChildren(ctx context.Context, q store.Q, userID, sessionID uuid.UUID) error {
+	rows, err := q.Query(ctx, `
+		UPDATE transcript_entries
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	type bumped struct {
+		id uuid.UUID
+		v  int
+	}
+	var entries []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		entries = append(entries, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range entries {
+		if err := logChange(ctx, q, userID, EntityEntry, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
+
+	for _, table := range []string{"bookmarks", "favorite_sessions"} {
+		rows, err := q.Query(ctx, `
+			UPDATE `+table+`
+			SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+			WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+			RETURNING id, server_version`, userID, sessionID)
+		if err != nil {
+			return err
+		}
+		var kids []bumped
+		for rows.Next() {
+			b := bumped{}
+			if err := rows.Scan(&b.id, &b.v); err != nil {
+				rows.Close()
+				return err
+			}
+			kids = append(kids, b)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		entity := EntityBookmark
+		if table == "favorite_sessions" {
+			entity = EntityFavorite
+		}
+		for _, b := range kids {
+			if err := logChange(ctx, q, userID, entity, b.id, "delete", b.v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// --- Entry ---------------------------------------------------------------------
+
+func (s *Service) applyEntry(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchEntry(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj == nil {
+			// Phantom entry tombstone.
+			sid := uuid.Nil
+			seq := 0
+			if p.SessionID != nil {
+				sid = *p.SessionID
+			}
+			if p.SequenceID != nil {
+				seq = *p.SequenceID
+			}
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO transcript_entries
+					(id, user_id, session_id, sequence_id, russian_text, server_version, created_at, updated_at, deleted_at)
+				VALUES ($1, $2, $3, $4, '', 1, now(), now(), now())
+				RETURNING updated_at`, item.EntityID, userID, sid, seq,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityEntry, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj.deletedAt != nil {
+			res := accepted(item, obj.serverVer, obj.updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var version int
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			UPDATE transcript_entries
+			SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+			WHERE id = $1 AND user_id = $2
+			RETURNING server_version, updated_at`, item.EntityID, userID,
+		).Scan(&version, &updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityEntry, item.EntityID, "delete", version); err != nil {
+			return nil, err
+		}
+		res := accepted(item, version, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// upsert: sessionId/sequenceId/russianText required.
+	if p.SessionID == nil || p.SequenceID == nil || p.RussianText == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	// Parent session must exist and be live, owned by the user.
+	parent, err := fetchSession(ctx, q, userID, *p.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if parent == nil || parent.deletedAt != nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		start, end := 0.0, 0.0
+		if p.StartOffset != nil {
+			start = *p.StartOffset
+		}
+		if p.EndOffset != nil {
+			end = *p.EndOffset
+		}
+		status := "pending"
+		if p.TranslationStatus != nil {
+			status = *p.TranslationStatus
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO transcript_entries
+				(id, user_id, session_id, sequence_id, start_offset, end_offset,
+				 russian_text, chinese_text, translation_status, server_version,
+				 created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, *p.SessionID, *p.SequenceID, start, end,
+			*p.RussianText, p.ChineseText, status,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityEntry, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		res := conflict(item, obj.serverVer, obj.updatedAt, entryRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, entryRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Russian immutability: a differing incoming russian → conflict (the
+	// server keeps its text). Identical text may proceed.
+	if p.RussianText != nil && *p.RussianText != obj.russian {
+		res := conflict(item, obj.serverVer, obj.updatedAt, entryRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	// Merge: non-empty incoming chinese wins; empty/None keeps server
+	// (Python rules — no clearChinese flag exists in protocol v1).
+	chinese := obj.chinese
+	if p.ChineseText != nil && *p.ChineseText != "" {
+		chinese = p.ChineseText
+	}
+	status := obj.status
+	if p.TranslationStatus != nil && *p.TranslationStatus != "" {
+		status = *p.TranslationStatus
+	}
+	start, end := obj.startOffset, obj.endOffset
+	if p.StartOffset != nil && obj.startOffset == 0 {
+		start = *p.StartOffset
+	}
+	if p.EndOffset != nil && obj.endOffset == 0 {
+		end = *p.EndOffset
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE transcript_entries
+		SET start_offset = $3, end_offset = $4, chinese_text = $5,
+		    translation_status = $6,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, start, end, chinese, status,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityEntry, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// --- Bookmark / Favorite ---------------------------------------------------------
+
+func (s *Service) applyBookmark(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchBookmark(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj != nil && obj.deletedAt == nil {
+			var version int
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				UPDATE bookmarks
+				SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+				WHERE id = $1 AND user_id = $2
+				RETURNING server_version, updated_at`, item.EntityID, userID,
+			).Scan(&version, &updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityBookmark, item.EntityID, "delete", version); err != nil {
+				return nil, err
+			}
+			res := accepted(item, version, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj == nil {
+			sid := uuid.Nil
+			if p.SessionID != nil {
+				sid = *p.SessionID
+			}
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO bookmarks (id, user_id, session_id, entry_id, is_bookmarked,
+					server_version, updated_at, deleted_at)
+				VALUES ($1, $2, $3, $4::uuid, false, 1, now(), now())
+				RETURNING updated_at`, item.EntityID, userID, sid, "00000000-0000-0000-0000-000000000000",
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityBookmark, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		// Already tombstoned: idempotent accepted.
+		res := accepted(item, obj.serverVer, obj.updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if p.EntryID == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if obj == nil {
+		if item.BaseVersion != 0 {
+			// Update for something never seen: treat as permanent reject
+			// (Python behavior — client pulls the record first).
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		sid := uuid.Nil
+		if p.SessionID != nil {
+			sid = *p.SessionID
+		}
+		is := true
+		if p.IsBookmarked != nil {
+			is = *p.IsBookmarked
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO bookmarks (id, user_id, session_id, entry_id, is_bookmarked,
+				server_version, updated_at)
+			VALUES ($1, $2, $3, $4, $5, 1, now())
+			RETURNING updated_at`, item.EntityID, userID, sid, *p.EntryID, is,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityBookmark, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil || item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, bookmarkRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	is := obj.isBookmarked
+	if p.IsBookmarked != nil {
+		is = *p.IsBookmarked
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE bookmarks SET is_bookmarked = $3,
+			server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`, item.EntityID, userID, is,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityBookmark, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (s *Service) applyFavorite(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchFavorite(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj != nil && obj.deletedAt == nil {
+			var version int
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				UPDATE favorite_sessions
+				SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+				WHERE id = $1 AND user_id = $2
+				RETURNING server_version, updated_at`, item.EntityID, userID,
+			).Scan(&version, &updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityFavorite, item.EntityID, "delete", version); err != nil {
+				return nil, err
+			}
+			res := accepted(item, version, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj == nil {
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO favorite_sessions (id, user_id, session_id, is_favorite,
+					server_version, updated_at, deleted_at)
+				VALUES ($1, $2, $3, false, 1, now(), now())
+				RETURNING updated_at`, item.EntityID, userID, uuid.Nil,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityFavorite, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		res := accepted(item, obj.serverVer, obj.updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		if item.BaseVersion != 0 || p.IsFavorite == nil {
+			res := rejected(item, "schema")
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		// Python: session_id = entityId when payload omits sessionId.
+		sid := item.EntityID
+		if p.SessionID != nil {
+			sid = *p.SessionID
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO favorite_sessions (id, user_id, session_id, is_favorite,
+				server_version, updated_at)
+			VALUES ($1, $2, $3, $4, 1, now())
+			RETURNING updated_at`, item.EntityID, userID, sid, *p.IsFavorite,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityFavorite, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil || item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, favoriteRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	is := obj.isFavorite
+	if p.IsFavorite != nil {
+		is = *p.IsFavorite
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE favorite_sessions SET is_favorite = $3,
+			server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`, item.EntityID, userID, is,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityFavorite, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// --- Pull -------------------------------------------------------------------------
+
+func (s *Service) Pull(ctx context.Context, userID uuid.UUID, cursor int64, limit int) (*PullResponse, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	q := s.db.Q()
+	rs, err := q.Query(ctx, `
+		SELECT change_sequence, entity_type, entity_id, operation, server_version
+		FROM sync_changes
+		WHERE user_id = $1 AND change_sequence > $2
+		ORDER BY change_sequence ASC
+		LIMIT $3`, userID, cursor, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rs.Close()
+
+	type changeRow struct {
+		seq     int64
+		etype   string
+		eid     uuid.UUID
+		op      string
+		version int
+	}
+	var rows []changeRow
+	for rs.Next() {
+		r := changeRow{}
+		if err := rs.Scan(&r.seq, &r.etype, &r.eid, &r.op, &r.version); err != nil {
+			return nil, err
+		}
+		rows = append(rows, r)
+	}
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	resp := &PullResponse{
+		SchemaVersion: s.cfg.SchemaVersion,
+		HasMore:       hasMore,
+		ServerTime:    time.Now(),
+		Changes:       []PullChange{},
+	}
+	for _, r := range rows {
+		change := PullChange{
+			ChangeSequence: r.seq,
+			EntityType:     r.etype,
+			EntityID:       r.eid.String(),
+			Operation:      r.op,
+			ServerVersion:  r.version,
+		}
+		if r.op == "upsert" {
+			rec, err := s.loadRecord(ctx, q, userID, r.etype, r.eid)
+			if err != nil {
+				return nil, err
+			}
+			change.Record = rec
+		}
+		resp.Changes = append(resp.Changes, change)
+	}
+	if len(rows) > 0 {
+		resp.NextCursor = rows[len(rows)-1].seq
+	} else {
+		resp.NextCursor = cursor
+	}
+	return resp, nil
+}
+
+func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, entityType string, id uuid.UUID) (json.RawMessage, error) {
+	switch entityType {
+	case EntitySession:
+		obj, err := fetchSession(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return sessionRecordJSON(obj), nil
+	case EntityEntry:
+		obj, err := fetchEntry(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return entryRecordJSON(obj), nil
+	case EntityBookmark:
+		obj, err := fetchBookmark(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return bookmarkRecordJSON(obj), nil
+	case EntityFavorite:
+		obj, err := fetchFavorite(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return favoriteRecordJSON(obj), nil
+	}
+	return nil, nil
+}
+
+// --- Status -----------------------------------------------------------------------
+
+func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
+	q := s.db.Q()
+	var tail, sessions, entries int
+	err := q.QueryRow(ctx, `
+		SELECT
+			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
+			(SELECT count(*) FROM classroom_sessions WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM transcript_entries WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries)
+	if err != nil {
+		return nil, err
+	}
+	return &SyncStatusResponse{
+		SchemaVersion:          s.cfg.SchemaVersion,
+		MinClientSchemaVersion: s.cfg.MinClientSchemaVersion,
+		MaxClientSchemaVersion: s.cfg.MaxClientSchemaVersion,
+		ChangeLogTail:          int64(tail),
+		SessionCount:           sessions,
+		EntryCount:             entries,
+		PendingCount:           0,
+		ServerTime:             time.Now(),
+	}, nil
+}

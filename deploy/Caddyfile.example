@@ -1,0 +1,58 @@
+# Caddy reverse proxy examples — automatic HTTPS via Let's Encrypt.
+#
+# 1. Point DNS A/AAAA records at this server.
+# 2. Copy to /etc/caddy/Caddyfile (adjust domains).
+# 3. In compose.yml remove the api/admin `ports:` mappings and attach the
+#    containers to a shared external network, or run Caddy on the host.
+
+# --- Public API (iOS clients) ---------------------------------------------------
+sync.example.com {
+	encode gzip
+
+	# Basic hardening: no transcript bodies, no Authorization header in logs.
+	log {
+		output file /var/log/caddy/sync.access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format filter {
+			wrap json
+			fields {
+				request>body delete
+				request>headers>Authorization delete
+			}
+		}
+	}
+
+	# Request size limit mirrors the app's MAX_BODY_BYTES.
+	request_body {
+		max_size 10MB
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# --- Admin UI (internal) --------------------------------------------------------
+# Separate hostname, IP-allowlisted, never linked publicly. The admin
+# interface is the only place a human operates user accounts; it must not
+# share the API's exposure.
+admin.example.com {
+	encode gzip
+
+	# Restrict to the operator network(s). Remove nothing else here.
+	@blocked not remote_ip 10.0.0.0/8 192.168.0.0/16
+	respond @blocked 403
+
+	log {
+		output file /var/log/caddy/admin.access.log {
+			roll_size 20MiB
+			roll_keep 10
+		}
+	}
+
+	# Cookies are Secure in production (DEV_MODE=false); this site must
+	# therefore be HTTPS, which Caddy provides automatically.
+	reverse_proxy 127.0.0.1:8081
+}

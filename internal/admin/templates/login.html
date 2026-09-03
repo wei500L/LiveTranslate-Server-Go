@@ -1,0 +1,11 @@
+{{template "head" .}}
+<div class="card" style="max-width:420px;margin:60px auto">
+  <h1>管理后台登录</h1>
+  <form method="post" action="/login">
+    <p><label>用户名<br><input type="text" name="username" autocomplete="username" required></label></p>
+    <p><label>密码<br><input type="password" name="password" autocomplete="current-password" required></label></p>
+    <p><label>TOTP 验证码（未启用可留空）<br><input type="text" name="totp_code" inputmode="numeric" pattern="[0-9 ]*" placeholder="123 456"></label></p>
+    <button type="submit">登录</button>
+  </form>
+</div>
+{{template "foot" .}}

@@ -1,0 +1,28 @@
+{{template "head" .}}
+<div class="card">
+  <h1>用户（{{.Data.Total}}）</h1>
+  <form method="get" action="/users" class="row">
+    <input type="text" name="q" placeholder="按邮箱前缀或显示名搜索" value="{{.Data.Q}}">
+    <button type="submit">搜索</button>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <tr><th>邮箱 / 标识</th><th>显示名</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>活跃会话</th><th>条目数</th></tr>
+    {{range .Data.Users}}
+    <tr>
+      <td><a href="/users/{{.ID}}">{{fmtEmailPtr .Email}}</a></td>
+      <td>{{.DisplayName}}</td>
+      <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+      <td class="muted">{{fmtTime .CreatedAt}}</td>
+      <td class="muted">{{fmtTimePtr .LastLoginAt}}</td>
+      <td>{{.SessionCount}}</td>
+      <td>{{.EntryCount}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="7" class="muted">没有匹配的用户</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">第 {{.Data.Page}} 页 · 每页 25 条</p>
+</div>
+{{template "foot" .}}

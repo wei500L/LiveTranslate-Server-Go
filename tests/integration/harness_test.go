@@ -153,7 +153,8 @@ var allTables = []string{
 	"password_reset_tokens", "login_events", "invitations", "admin_accounts",
 	"admin_sessions", "audit_events", "devices", "refresh_tokens",
 	"classroom_sessions", "transcript_entries", "bookmarks",
-	"favorite_sessions", "sync_changes", "processed_operations",
+	"favorite_sessions", "session_notes", "study_reviews",
+	"session_attachments", "sync_changes", "processed_operations",
 }
 
 func truncateAll(t *testing.T) {

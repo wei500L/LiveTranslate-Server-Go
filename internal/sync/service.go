@@ -4,24 +4,77 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"livetranslate/server/internal/config"
+	attachmentstore "livetranslate/server/internal/storage"
 	"livetranslate/server/internal/store"
 )
+
+// --- post-commit hooks -------------------------------------------------------
+//
+// Attachment deletes tombstone the row inside the push transaction but
+// must only reap files AFTER the commit (a rollback must leave files
+// alone). The collector rides the request context, so concurrent pushes
+// each carry their own.
+
+type postCommitKey struct{}
+
+type postCommitHooks struct {
+	mu  sync.Mutex
+	fns []func()
+}
+
+func withPostCommit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, postCommitKey{}, &postCommitHooks{})
+}
+
+func runPostCommit(ctx context.Context) {
+	h, ok := ctx.Value(postCommitKey{}).(*postCommitHooks)
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	fns := h.fns
+	h.fns = nil
+	h.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+func deferFileCleanup(ctx context.Context, fn func()) {
+	if h, ok := ctx.Value(postCommitKey{}).(*postCommitHooks); ok {
+		h.mu.Lock()
+		h.fns = append(h.fns, fn)
+		h.mu.Unlock()
+	}
+}
 
 // Service is the sync engine. All public methods take the resolved user ID;
 // every SQL statement filters on it (user isolation is structural).
 type Service struct {
 	cfg *config.Config
 	db  *store.DB
+	// attachments is the optional file backend used to reap files after a
+	// tombstone commit (best-effort, outside the push transaction).
+	attachments *attachmentstore.Store
 }
 
 func NewService(cfg *config.Config, db *store.DB) *Service {
 	return &Service{cfg: cfg, db: db}
+}
+
+// SetAttachmentStore wires the optional file backend used for post-commit
+// file reaping after attachment tombstones. Nil (the default) disables
+// file cleanup; metadata still tombstones correctly.
+func (s *Service) SetAttachmentStore(store *attachmentstore.Store) {
+	s.attachments = store
 }
 
 // --- Row readers ------------------------------------------------------------
@@ -320,6 +373,111 @@ func studyReviewRecordJSON(r *studyReviewRow) json.RawMessage {
 	return b
 }
 
+type attachmentRow struct {
+	id          uuid.UUID
+	userID      uuid.UUID
+	sessionID   uuid.UUID
+	courseID    *uuid.UUID
+	anchorEntry *uuid.UUID
+	capturedAt  time.Time
+	title       string
+	caption     string
+	kind        string
+	mime        string
+	width       int
+	height      int
+	fileSize    int64
+	hash        string
+	sortIndex   int
+	transform   string
+	analysisSt  string
+	analysis    []byte
+	ocrText     string
+	serverVer   int
+	createdAt   time.Time
+	updatedAt   time.Time
+	deletedAt   *time.Time
+}
+
+func fetchAttachment(ctx context.Context, q store.Q, userID, id uuid.UUID) (*attachmentRow, error) {
+	a := &attachmentRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, session_id, course_id, anchor_entry_id, captured_at,
+		       title, caption, kind, mime_type, pixel_width, pixel_height,
+		       file_size, content_hash, sort_index, transform_json,
+		       analysis_status, analysis, ocr_text,
+		       server_version, created_at, updated_at, deleted_at
+		FROM session_attachments WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&a.id, &a.userID, &a.sessionID, &a.courseID, &a.anchorEntry, &a.capturedAt,
+		&a.title, &a.caption, &a.kind, &a.mime, &a.width, &a.height,
+		&a.fileSize, &a.hash, &a.sortIndex, &a.transform,
+		&a.analysisSt, &a.analysis, &a.ocrText,
+		&a.serverVer, &a.createdAt, &a.updatedAt, &a.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func attachmentRecordJSON(a *attachmentRow) json.RawMessage {
+	var courseID, anchor *string
+	if a.courseID != nil {
+		cid := a.courseID.String()
+		courseID = &cid
+	}
+	if a.anchorEntry != nil {
+		aid := a.anchorEntry.String()
+		anchor = &aid
+	}
+	var analysis *string
+	if len(a.analysis) > 0 {
+		s := string(a.analysis)
+		analysis = &s
+	}
+	b, _ := json.Marshal(attachmentRecord{
+		EntityType: EntityAttachment, ID: a.id.String(), SessionID: a.sessionID.String(),
+		CourseID: courseID, AnchorEntryID: anchor,
+		CapturedAt: a.capturedAt, Title: a.title, Caption: a.caption,
+		Kind: a.kind, MimeType: a.mime, Width: a.width, Height: a.height,
+		FileSize: a.fileSize, ContentHash: a.hash, SortIndex: a.sortIndex,
+		Transform:     a.transform,
+		AnalysisState: a.analysisSt, Analysis: analysis, OcrText: a.ocrText,
+		ServerVersion: a.serverVer, Deleted: a.deletedAt != nil,
+	})
+	return b
+}
+
+// AttachmentMeta is the read-only projection the /v1/attachments routes
+// need for ownership and byte-contract checks.
+type AttachmentMeta struct {
+	Deleted     bool
+	MimeType    string
+	FileSize    int64
+	ContentHash string
+}
+
+// GetAttachmentMeta loads the ownership/contract fields of one
+// attachment. Nil means the row does not exist for this user.
+func GetAttachmentMeta(ctx context.Context, q store.Q, userID, id uuid.UUID) (*AttachmentMeta, error) {
+	var deletedAt *time.Time
+	var mime, hash string
+	var size int64
+	err := q.QueryRow(ctx, `
+		SELECT mime_type, file_size, content_hash, deleted_at
+		FROM session_attachments WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&mime, &size, &hash, &deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &AttachmentMeta{Deleted: deletedAt != nil, MimeType: mime, FileSize: size, ContentHash: hash}, nil
+}
+
 // --- Change log + ledger helpers ---------------------------------------------
 
 func logChange(ctx context.Context, q store.Q, userID uuid.UUID, entityType string, entityID uuid.UUID, operation string, serverVersion int) error {
@@ -372,6 +530,9 @@ func rejected(item *PushItem, code string) *PushItemResult {
 //     rejected; deleted rows conflict (delete-wins, no resurrection).
 func (s *Service) ApplyPush(ctx context.Context, userID uuid.UUID, items []PushItem) ([]PushItemResult, error) {
 	results := make([]PushItemResult, 0, len(items))
+	// File-reaping hooks registered during the transaction run only after
+	// a successful commit; a rollback discards them.
+	ctx = withPostCommit(ctx)
 	err := s.db.Tx(ctx, func(tx pgx.Tx) error {
 		q := store.TxQ(tx)
 		for i := range items {
@@ -386,6 +547,7 @@ func (s *Service) ApplyPush(ctx context.Context, userID uuid.UUID, items []PushI
 	if err != nil {
 		return nil, err
 	}
+	runPostCommit(ctx)
 	return results, nil
 }
 
@@ -436,6 +598,8 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyCourse(ctx, q, userID, item)
 	case EntityNote:
 		return s.applyNote(ctx, q, userID, item)
+	case EntityAttachment:
+		return s.applyAttachment(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -761,6 +925,35 @@ func (s *Service) cascadeDeleteChildren(ctx context.Context, q store.Q, userID, 
 	}
 	for _, b := range reviews {
 		if err := logChange(ctx, q, userID, EntityStudyReview, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
+
+	// Attachments follow the session into the tombstone (their files are
+	// reaped later by the file GC once the row's retention lapses).
+	rows, err = q.Query(ctx, `
+		UPDATE session_attachments
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	var attachments []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		attachments = append(attachments, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range attachments {
+		if err := logChange(ctx, q, userID, EntityAttachment, b.id, "delete", b.v); err != nil {
 			return err
 		}
 	}
@@ -1824,6 +2017,302 @@ func (s *Service) applyStudyReview(ctx context.Context, q store.Q, userID uuid.U
 	return res, nil
 }
 
+// applyAttachment: classroom image metadata + structured analysis. Files
+// never travel through this path (the /v1/attachments routes carry them);
+// file_size/content_hash here are the contract the upload route verifies
+// against, so the row always describes its files. title/caption/kind/ocr
+// merge like noteText (non-empty incoming wins — the product has no
+// clear-to-empty flow; removal is a delete), the anchor and course
+// reference follow the uuid.Nil-clears sentinel. Analysis status is
+// always overwritten when present, the analysis object only when
+// present and non-empty (a failed regeneration keeps the last good
+// result, matching study review content rules).
+func (s *Service) applyAttachment(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchAttachment(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj == nil {
+			// Phantom tombstone.
+			sid := uuid.Nil
+			if p.SessionID != nil {
+				sid = *p.SessionID
+			}
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO session_attachments
+					(id, user_id, session_id, server_version, created_at, updated_at, deleted_at)
+				VALUES ($1, $2, $3, 1, now(), now(), now())
+				RETURNING updated_at`, item.EntityID, userID, sid,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityAttachment, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj.deletedAt != nil {
+			res := accepted(item, obj.serverVer, obj.updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var version int
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			UPDATE session_attachments
+			SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+			WHERE id = $1 AND user_id = $2
+			RETURNING server_version, updated_at`, item.EntityID, userID,
+		).Scan(&version, &updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityAttachment, item.EntityID, "delete", version); err != nil {
+			return nil, err
+		}
+		if s.attachments != nil {
+			// File cleanup runs only after the enclosing push transaction
+			// commits (see withPostCommit); a rollback discards the hook.
+			deferFileCleanup(ctx, func() {
+				if err := s.attachments.DeleteFiles(userID, item.EntityID); err != nil {
+					slog.Error("attachment file cleanup failed", "user_id", userID, "attachment_id", item.EntityID, "err", err.Error())
+				}
+			})
+		}
+		res := accepted(item, version, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// upsert: sessionId + attachmentCapturedAt required (the capture time
+	// is what orders the timeline).
+	if p.SessionID == nil || p.AttachmentCapturedAt == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	// Parent session must exist and be live, owned by the user.
+	parent, err := fetchSession(ctx, q, userID, *p.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if parent == nil || parent.deletedAt != nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		title, caption, kind, mime := "", "", "other", ""
+		if p.Title != nil {
+			title = *p.Title
+		}
+		if p.AttachmentCaption != nil {
+			caption = *p.AttachmentCaption
+		}
+		if p.AttachmentKind != nil && *p.AttachmentKind != "" {
+			kind = *p.AttachmentKind
+		}
+		if p.AttachmentMime != nil {
+			mime = *p.AttachmentMime
+		}
+		var width, height, sortIndex int
+		var fileSize int64
+		var hash, ocr, analysisSt string
+		if p.AttachmentWidth != nil {
+			width = *p.AttachmentWidth
+		}
+		if p.AttachmentHeight != nil {
+			height = *p.AttachmentHeight
+		}
+		if p.AttachmentFileSize != nil {
+			fileSize = *p.AttachmentFileSize
+		}
+		if p.AttachmentHash != nil {
+			hash = *p.AttachmentHash
+		}
+		if p.AttachmentSortIndex != nil {
+			sortIndex = *p.AttachmentSortIndex
+		}
+		transform := ""
+		if p.AttachmentTransform != nil {
+			transform = *p.AttachmentTransform
+		}
+		if p.AttachmentOcrText != nil {
+			ocr = *p.AttachmentOcrText
+		}
+		if p.AttachmentAnalysisState != nil && *p.AttachmentAnalysisState != "" {
+			analysisSt = *p.AttachmentAnalysisState
+		} else {
+			analysisSt = "pending"
+		}
+		var analysis string
+		if p.AttachmentAnalysis != nil && *p.AttachmentAnalysis != "" {
+			analysis = *p.AttachmentAnalysis
+		}
+		// Sentinel refs: uuid.Nil never reaches the row.
+		var courseID, anchor *uuid.UUID
+		if p.CourseID != nil && *p.CourseID != uuid.Nil {
+			courseID = p.CourseID
+		}
+		if p.AnchorEntry != nil && *p.AnchorEntry != uuid.Nil {
+			anchor = p.AnchorEntry
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO session_attachments
+				(id, user_id, session_id, course_id, anchor_entry_id, captured_at,
+				 title, caption, kind, mime_type, pixel_width, pixel_height,
+				 file_size, content_hash, sort_index, transform_json,
+				 analysis_status, analysis, ocr_text,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			        $13, $14, $15, $16, $17, NULLIF($18, '')::jsonb, $19, 1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, *p.SessionID, courseID, anchor, *p.AttachmentCapturedAt,
+			title, caption, kind, mime, width, height,
+			fileSize, hash, sortIndex, transform, analysisSt, analysis, ocr,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityAttachment, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		// Delete-wins: deleted attachments stay deleted.
+		res := conflict(item, obj.serverVer, obj.updatedAt, attachmentRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, attachmentRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge.
+	title, caption, kind, mime := obj.title, obj.caption, obj.kind, obj.mime
+	if p.Title != nil && *p.Title != "" {
+		title = *p.Title
+	}
+	if p.AttachmentCaption != nil && *p.AttachmentCaption != "" {
+		caption = *p.AttachmentCaption
+	}
+	if p.AttachmentKind != nil && *p.AttachmentKind != "" {
+		kind = *p.AttachmentKind
+	}
+	if p.AttachmentMime != nil && *p.AttachmentMime != "" {
+		mime = *p.AttachmentMime
+	}
+	// Immutable after creation: the files and their identity (hash, size,
+	// dimensions, mime) describe the stored bytes; an edit produces a new
+	// attachment. Present-but-differing values are silently ignored (iOS
+	// never rewrites them after the first push).
+	width, height, sortIndex := obj.width, obj.height, obj.sortIndex
+	if p.AttachmentSortIndex != nil {
+		sortIndex = *p.AttachmentSortIndex
+	}
+	courseID := obj.courseID
+	if p.CourseID != nil {
+		if *p.CourseID == uuid.Nil {
+			courseID = nil
+		} else {
+			courseID = p.CourseID
+		}
+	}
+	anchor := obj.anchorEntry
+	if p.AnchorEntry != nil {
+		if *p.AnchorEntry == uuid.Nil {
+			anchor = nil
+		} else {
+			anchor = p.AnchorEntry
+		}
+	}
+	capturedAt := obj.capturedAt
+	if p.AttachmentCapturedAt != nil {
+		capturedAt = *p.AttachmentCapturedAt
+	}
+	ocr := obj.ocrText
+	if p.AttachmentOcrText != nil && *p.AttachmentOcrText != "" {
+		ocr = *p.AttachmentOcrText
+	}
+	analysisSt := obj.analysisSt
+	if p.AttachmentAnalysisState != nil && *p.AttachmentAnalysisState != "" {
+		analysisSt = *p.AttachmentAnalysisState
+	}
+	transform := obj.transform
+	if p.AttachmentTransform != nil {
+		transform = *p.AttachmentTransform
+	}
+	analysis := obj.analysis
+	if p.AttachmentAnalysis != nil && *p.AttachmentAnalysis != "" {
+		analysis = []byte(*p.AttachmentAnalysis)
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE session_attachments
+		SET title = $3, caption = $4, kind = $5, mime_type = $6,
+		    pixel_width = $7, pixel_height = $8, sort_index = $9,
+		    course_id = $10, anchor_entry_id = $11, captured_at = $12,
+		    ocr_text = $13, analysis_status = $14, transform_json = $15,
+		    analysis = CASE WHEN $16 = '' THEN NULL ELSE $16::jsonb END,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, title, caption, kind, mime,
+		width, height, sortIndex, courseID, anchor, capturedAt,
+		ocr, analysisSt, transform, string(analysis),
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityAttachment, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // --- Pull -------------------------------------------------------------------------
 
 func (s *Service) Pull(ctx context.Context, userID uuid.UUID, cursor int64, limit int) (*PullResponse, error) {
@@ -1943,6 +2432,12 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return studyReviewRecordJSON(obj), nil
+	case EntityAttachment:
+		obj, err := fetchAttachment(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return attachmentRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -1951,7 +2446,7 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
-	var tail, sessions, entries, courses, notes, reviews int
+	var tail, sessions, entries, courses, notes, reviews, attachments int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -1959,8 +2454,9 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM transcript_entries WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM courses WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM session_notes WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM study_reviews WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews)
+			(SELECT count(*) FROM study_reviews WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM session_attachments WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments)
 	if err != nil {
 		return nil, err
 	}
@@ -1974,6 +2470,7 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		CourseCount:            courses,
 		NoteCount:              notes,
 		ReviewCount:            reviews,
+		AttachmentCount:        attachments,
 		PendingCount:           0,
 		ServerTime:             time.Now(),
 	}, nil

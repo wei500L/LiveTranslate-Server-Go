@@ -70,6 +70,12 @@ type Config struct {
 	MinClientSchemaVersion int
 	MaxClientSchemaVersion int
 
+	// Attachment file storage (classroom images). Empty dir disables the
+	// /v1/attachments routes (metadata still syncs; clients keep files
+	// local-only and the UI reports the images as not uploaded).
+	AttachmentStorageDir     string
+	AttachmentMaxUploadBytes int64
+
 	// Retention for maintenance cleanup (days; 0 = keep forever).
 	LoginEventsRetentionDays int
 	AuditRetentionDays       int
@@ -184,6 +190,9 @@ func Load() (*Config, error) {
 		SchemaVersion:          envInt("SCHEMA_VERSION", 1),
 		MinClientSchemaVersion: envInt("MIN_CLIENT_SCHEMA_VERSION", 1),
 		MaxClientSchemaVersion: envInt("MAX_CLIENT_SCHEMA_VERSION", 1),
+
+		AttachmentStorageDir:     env("ATTACHMENT_STORAGE_DIR", ""),
+		AttachmentMaxUploadBytes: int64(envInt("ATTACHMENT_STORAGE_MAX_UPLOAD_BYTES", 40*1024*1024)),
 
 		LoginEventsRetentionDays: envInt("LOGIN_EVENTS_RETENTION_DAYS", 90),
 		AuditRetentionDays:       envInt("AUDIT_RETENTION_DAYS", 365),

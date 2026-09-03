@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"livetranslate/server/internal/metrics"
 )
 
@@ -23,7 +25,13 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 
 	deleted := int64(0)
 	// Tombstoned entity rows (children first to keep the deletes cheap even
-	// without FK cascades in the path).
+	// without FK cascades in the path). session_attachments goes first of
+	// all so its files can be reaped while the rows still exist.
+	attachmentIDs, err := s.gcTombstonedAttachments(ctx, cutoff)
+	if err != nil {
+		return err
+	}
+	deleted += int64(len(attachmentIDs))
 	for _, table := range []string{
 		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
 		"study_reviews", "classroom_sessions", "courses",
@@ -56,6 +64,57 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 	metrics.Inc(metrics.TombstoneGcRuns)
 	metrics.Add(metrics.MaintenanceDeleted, deleted)
 	return nil
+}
+
+// gcTombstonedAttachments deletes attachment rows past retention and
+// reaps their files. Rows are collected (user, id) first so the files
+// can be removed after the row delete without a second query.
+func (s *Service) gcTombstonedAttachments(ctx context.Context, cutoff time.Time) ([][2]string, error) {
+	rows, err := s.db.Q().Query(ctx, `
+		SELECT user_id::text, id::text FROM session_attachments
+		WHERE deleted_at IS NOT NULL AND deleted_at < $1`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	var ids [][2]string
+	for rows.Next() {
+		var pair [2]string
+		if err := rows.Scan(&pair[0], &pair[1]); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, pair)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.Q().Exec(ctx, `
+		DELETE FROM session_attachments
+		WHERE deleted_at IS NOT NULL AND deleted_at < $1`, cutoff); err != nil {
+		return nil, err
+	}
+	slog.Info("tombstone gc", "table", "session_attachments", "rows", len(ids))
+	if s.attachments != nil {
+		for _, pair := range ids {
+			uid, err := uuid.Parse(pair[0])
+			if err != nil {
+				continue
+			}
+			aid, err := uuid.Parse(pair[1])
+			if err != nil {
+				continue
+			}
+			if err := s.attachments.DeleteFiles(uid, aid); err != nil {
+				// Best-effort: a stray file is disk noise, not data loss.
+				slog.Error("attachment file gc failed", "user_id", uid, "attachment_id", aid, "err", err.Error())
+			}
+		}
+	}
+	return ids, nil
 }
 
 // RunMaintenanceCleanup prunes the auth-side ephemeral state. Kept separate

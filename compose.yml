@@ -58,6 +58,12 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-LiveTranslate}
       SMTP_TLS_MODE: ${SMTP_TLS_MODE:-starttls}
       METRICS_ENABLED: ${METRICS_ENABLED:-false}
+      # Classroom image attachments (optional — empty = metadata-only sync,
+      # clients keep the files local). Point at a named volume or a bind
+      # mount you back up; NOT /tmp.
+      ATTACHMENT_STORAGE_DIR: ${ATTACHMENT_STORAGE_DIR:-/var/lib/livetranslate/attachments}
+    volumes:
+      - attachmentdata:/var/lib/livetranslate/attachments
     ports:
       # In production remove this mapping and proxy via Caddy/Nginx.
       - "8000:8000"
@@ -87,3 +93,4 @@ services:
 
 volumes:
   pgdata:
+  attachmentdata:

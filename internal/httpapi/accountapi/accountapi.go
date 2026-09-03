@@ -4,23 +4,35 @@
 package accountapi
 
 import (
+	"log/slog"
 	"net/http"
+
+	"github.com/google/uuid"
 
 	"livetranslate/server/internal/auth"
 	"livetranslate/server/internal/httpapi"
 	authapi "livetranslate/server/internal/httpapi/auth"
+	"livetranslate/server/internal/storage"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
 )
 
 type Handler struct {
-	db   *store.DB
-	auth *authapi.Handler
-	svc  *auth.Service
+	db          *store.DB
+	auth        *authapi.Handler
+	svc         *auth.Service
+	attachments *storage.Store
 }
 
 func NewHandler(db *store.DB, auth *authapi.Handler, svc *auth.Service) *Handler {
 	return &Handler{db: db, auth: auth, svc: svc}
+}
+
+// SetAttachmentStore wires the optional file backend so account/cloud
+// purges also delete the user's attachment files. Nil (the default)
+// leaves the purges metadata-only.
+func (h *Handler) SetAttachmentStore(attachments *storage.Store) {
+	h.attachments = attachments
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -52,6 +64,7 @@ func (h *Handler) deleteCloudData(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	h.purgeAttachmentFiles(r, ac.User.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -69,5 +82,18 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	h.purgeAttachmentFiles(r, ac.User.ID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// purgeAttachmentFiles best-effort removes the user's attachment files
+// after the metadata rows are already gone. A failure is logged, not
+// surfaced — the rows no longer reference the files either way.
+func (h *Handler) purgeAttachmentFiles(r *http.Request, userID uuid.UUID) {
+	if h.attachments == nil {
+		return
+	}
+	if err := h.attachments.DeleteUserFiles(userID); err != nil {
+		slog.Error("user attachment file purge failed", "request_id", httpapi.RequestID(r.Context()), "err", err.Error())
+	}
 }

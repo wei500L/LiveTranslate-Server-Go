@@ -98,6 +98,28 @@ type PushPayload struct {
 	ReviewModel       *string    `json:"reviewModel"`
 	ReviewGeneratedAt *time.Time `json:"reviewGeneratedAt"`
 	ReviewSourceAt    *time.Time `json:"reviewSourceUpdatedAt"`
+	// session attachment (classroom image). title rides Title; caption is
+	// the user's own description; anchorEntryId/courseId reuse the shared
+	// reference fields with the uuid.Nil-clears sentinel. attachmentAnalysis
+	// is the versioned structured multimodal result as a JSON STRING (the
+	// same convention as reviewContent — the row's analysis column casts it
+	// into JSONB); attachmentOcrText is the separate local OCR text.
+	AttachmentKind       *string    `json:"attachmentKind"`
+	AttachmentMime       *string    `json:"attachmentMime"`
+	AttachmentWidth      *int       `json:"attachmentWidth"`
+	AttachmentHeight     *int       `json:"attachmentHeight"`
+	AttachmentFileSize   *int64     `json:"attachmentFileSize"`
+	AttachmentHash       *string    `json:"attachmentHash"`
+	AttachmentCapturedAt *time.Time `json:"attachmentCapturedAt"`
+	AttachmentCaption    *string    `json:"attachmentCaption"`
+	AttachmentSortIndex  *int       `json:"attachmentSortIndex"`
+	// attachmentTransform is the non-destructive display transform
+	// (rotation + normalized crop) as a JSON string. Absent = keep; the
+	// original file bytes are never modified server-side.
+	AttachmentTransform     *string `json:"attachmentTransform"`
+	AttachmentAnalysisState *string `json:"attachmentAnalysisStatus"`
+	AttachmentAnalysis      *string `json:"attachmentAnalysis"`
+	AttachmentOcrText       *string `json:"attachmentOcrText"`
 }
 
 type PushItem struct {
@@ -159,11 +181,13 @@ type SyncStatusResponse struct {
 	CourseCount            int       `json:"courseCount"`
 	NoteCount              int       `json:"noteCount"`
 	ReviewCount            int       `json:"reviewCount"`
+	AttachmentCount        int       `json:"attachmentCount"`
 	PendingCount           int       `json:"pendingCount"`
 	ServerTime             time.Time `json:"serverTime"`
 }
 
-// Entity constants (wire strings).
+// Entity constants (wire strings). "attachment" (11 chars) stays within
+// the VARCHAR(16) entity_type columns of sync_changes/processed_operations.
 const (
 	EntitySession     = "session"
 	EntityEntry       = "entry"
@@ -172,13 +196,14 @@ const (
 	EntityCourse      = "course"
 	EntityNote        = "note"
 	EntityStudyReview = "study_review"
+	EntityAttachment  = "attachment"
 )
 
 func validEntityType(t string) bool {
 	return t == EntitySession || t == EntityEntry ||
 		t == EntityBookmark || t == EntityFavorite ||
 		t == EntityCourse || t == EntityNote ||
-		t == EntityStudyReview
+		t == EntityStudyReview || t == EntityAttachment
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -269,4 +294,32 @@ type studyReviewRecord struct {
 	SourceUpdatedAt  *time.Time `json:"reviewSourceUpdatedAt,omitempty"`
 	ServerVersion    int        `json:"serverVersion"`
 	Deleted          bool       `json:"deleted"`
+}
+
+type attachmentRecord struct {
+	EntityType string `json:"entityType"`
+	ID         string `json:"id"`
+	SessionID  string `json:"sessionId"`
+	// Nil omits the key (standalone / unanchored), matching session/note.
+	CourseID      *string `json:"courseId,omitempty"`
+	AnchorEntryID *string `json:"anchorEntryId,omitempty"`
+	// Field names mirror the push payload (attachmentXxx / title) so iOS
+	// decodes records and conflict payloads with the same CodingKeys.
+	// Analysis is a JSON string (see PushPayload.AttachmentAnalysis).
+	CapturedAt    time.Time `json:"attachmentCapturedAt"`
+	Title         string    `json:"title"`
+	Caption       string    `json:"attachmentCaption"`
+	Kind          string    `json:"attachmentKind"`
+	MimeType      string    `json:"attachmentMime"`
+	Width         int       `json:"attachmentWidth"`
+	Height        int       `json:"attachmentHeight"`
+	FileSize      int64     `json:"attachmentFileSize"`
+	ContentHash   string    `json:"attachmentHash"`
+	SortIndex     int       `json:"attachmentSortIndex"`
+	Transform     string    `json:"attachmentTransform,omitempty"`
+	AnalysisState string    `json:"attachmentAnalysisStatus"`
+	Analysis      *string   `json:"attachmentAnalysis,omitempty"`
+	OcrText       string    `json:"attachmentOcrText,omitempty"`
+	ServerVersion int       `json:"serverVersion"`
+	Deleted       bool      `json:"deleted"`
 }

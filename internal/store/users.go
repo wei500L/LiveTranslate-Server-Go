@@ -145,12 +145,13 @@ func SoftDeleteUser(ctx context.Context, q Q, id uuid.UUID) error {
 
 // PurgeUserSyncData hard-deletes synced classroom data + change log +
 // idempotency ledger. The account and its devices survive. Same scope as
-// the Python purge_user_sync_data.
+// the Python purge_user_sync_data. Attachment FILES are not touched here
+// (the caller reaps them post-commit via the storage store).
 func PurgeUserSyncData(ctx context.Context, q Q, userID uuid.UUID) error {
 	for _, table := range []string{
 		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
-		"study_reviews", "classroom_sessions", "courses", "sync_changes",
-		"processed_operations",
+		"study_reviews", "session_attachments", "classroom_sessions", "courses",
+		"sync_changes", "processed_operations",
 	} {
 		if _, err := q.Exec(ctx,
 			`DELETE FROM `+table+` WHERE user_id = $1`, userID); err != nil {

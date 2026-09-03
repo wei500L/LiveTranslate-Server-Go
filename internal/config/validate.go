@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -87,6 +88,20 @@ func (c *Config) ValidateProduction() error {
 	}
 	if err := validateAdminBind(c.AdminListenAddr, c.AdminAllowWildcardBind); err != nil {
 		problems = append(problems, err.Error())
+	}
+	if c.AttachmentStorageDir != "" {
+		// Users upload long-lived study material into this directory; it
+		// must be a real, dedicated, writable location (not /tmp or a
+		// placeholder). Relative paths resolve against the process cwd —
+		// refusing them avoids the classic "files vanished after the
+		// service restarted under a different cwd" failure.
+		if isPlaceholder(c.AttachmentStorageDir) {
+			problems = append(problems, "ATTACHMENT_STORAGE_DIR must be a real directory path, not a placeholder")
+		} else if !filepath.IsAbs(c.AttachmentStorageDir) {
+			problems = append(problems, "ATTACHMENT_STORAGE_DIR must be an absolute path")
+		} else if c.AttachmentStorageDir == "/tmp" || c.AttachmentStorageDir == "/var/tmp" {
+			problems = append(problems, "ATTACHMENT_STORAGE_DIR must not point at the system temp directory")
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("production configuration rejected:\n  - %s", strings.Join(problems, "\n  - "))

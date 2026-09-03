@@ -19,11 +19,13 @@ import (
 	"livetranslate/server/internal/config"
 	"livetranslate/server/internal/httpapi"
 	accountapi "livetranslate/server/internal/httpapi/accountapi"
+	attachmentapi "livetranslate/server/internal/httpapi/attachmentapi"
 	authapi "livetranslate/server/internal/httpapi/auth"
 	"livetranslate/server/internal/httpapi/middleware"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
 	"livetranslate/server/internal/mail"
 	"livetranslate/server/internal/metrics"
+	"livetranslate/server/internal/storage"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
 	"livetranslate/server/internal/token"
@@ -88,6 +90,20 @@ func runServe() error {
 	authSvc := auth.NewService(cfg, st, tokens, mailer, auditor)
 	syncSvc := syncpkg.NewService(cfg, st)
 
+	// Attachment file storage (optional — enabled by ATTACHMENT_STORAGE_DIR).
+	// Metadata sync works without it; when nil, attachment files stay
+	// local-only on the clients.
+	var attachmentStore *storage.Store
+	if cfg.AttachmentStorageDir != "" {
+		var err error
+		attachmentStore, err = storage.NewStore(cfg.AttachmentStorageDir)
+		if err != nil {
+			return fmt.Errorf("attachment storage: %w", err)
+		}
+		syncSvc.SetAttachmentStore(attachmentStore)
+		slog.Info("attachment storage enabled", "dir", cfg.AttachmentStorageDir)
+	}
+
 	trust, err := middleware.ParseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
@@ -110,7 +126,16 @@ func runServe() error {
 	authH := authapi.NewHandler(cfg, authSvc, tokens, st, trust)
 	authH.Register(mux)
 	syncapi.NewHandler(cfg, syncSvc, authH).Register(mux)
-	accountapi.NewHandler(st, authH, authSvc).Register(mux)
+	if attachmentStore != nil {
+		attachmentH := attachmentapi.NewHandler(st, authH, attachmentStore)
+		attachmentH.SetMaxUploadBytes(cfg.AttachmentMaxUploadBytes)
+		attachmentH.Register(mux)
+	}
+	accountH := accountapi.NewHandler(st, authH, authSvc)
+	if attachmentStore != nil {
+		accountH.SetAttachmentStore(attachmentStore)
+	}
+	accountH.Register(mux)
 
 	// Public web surfaces: reset deep-link landing + AASA.
 	webapp.NewHandler(cfg, st, authSvc, trust).Register(mux)

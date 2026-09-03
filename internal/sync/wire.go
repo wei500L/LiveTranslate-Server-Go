@@ -91,6 +91,13 @@ type PushPayload struct {
 	IsArchived  *bool      `json:"isArchived"`
 	NoteText    *string    `json:"noteText"`
 	AnchorEntry *uuid.UUID `json:"anchorEntryId"`
+	// study review (entity id == session id; status of the review itself).
+	ReviewStatus      *string    `json:"reviewStatus"`
+	ReviewContent     *string    `json:"reviewContent"`
+	ReviewGenerated   *string    `json:"reviewGeneratedContent"`
+	ReviewModel       *string    `json:"reviewModel"`
+	ReviewGeneratedAt *time.Time `json:"reviewGeneratedAt"`
+	ReviewSourceAt    *time.Time `json:"reviewSourceUpdatedAt"`
 }
 
 type PushItem struct {
@@ -151,24 +158,27 @@ type SyncStatusResponse struct {
 	EntryCount             int       `json:"entryCount"`
 	CourseCount            int       `json:"courseCount"`
 	NoteCount              int       `json:"noteCount"`
+	ReviewCount            int       `json:"reviewCount"`
 	PendingCount           int       `json:"pendingCount"`
 	ServerTime             time.Time `json:"serverTime"`
 }
 
 // Entity constants (wire strings).
 const (
-	EntitySession  = "session"
-	EntityEntry    = "entry"
-	EntityBookmark = "bookmark"
-	EntityFavorite = "favorite"
-	EntityCourse   = "course"
-	EntityNote     = "note"
+	EntitySession     = "session"
+	EntityEntry       = "entry"
+	EntityBookmark    = "bookmark"
+	EntityFavorite    = "favorite"
+	EntityCourse      = "course"
+	EntityNote        = "note"
+	EntityStudyReview = "study_review"
 )
 
 func validEntityType(t string) bool {
 	return t == EntitySession || t == EntityEntry ||
 		t == EntityBookmark || t == EntityFavorite ||
-		t == EntityCourse || t == EntityNote
+		t == EntityCourse || t == EntityNote ||
+		t == EntityStudyReview
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -243,4 +253,20 @@ type noteRecord struct {
 	NoteText      string  `json:"noteText"`
 	ServerVersion int     `json:"serverVersion"`
 	Deleted       bool    `json:"deleted"`
+}
+
+type studyReviewRecord struct {
+	EntityType string `json:"entityType"`
+	ID         string `json:"id"`
+	SessionID  string `json:"sessionId"`
+	// Field names mirror the push payload so iOS decodes records and
+	// conflict payloads with the same CodingKeys.
+	Status           string     `json:"reviewStatus"`
+	Content          string     `json:"reviewContent"`
+	GeneratedContent string     `json:"reviewGeneratedContent"`
+	ReviewModel      string     `json:"reviewModel"`
+	GeneratedAt      *time.Time `json:"reviewGeneratedAt,omitempty"`
+	SourceUpdatedAt  *time.Time `json:"reviewSourceUpdatedAt,omitempty"`
+	ServerVersion    int        `json:"serverVersion"`
+	Deleted          bool       `json:"deleted"`
 }

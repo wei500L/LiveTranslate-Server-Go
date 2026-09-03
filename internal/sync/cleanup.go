@@ -26,7 +26,7 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 	// without FK cascades in the path).
 	for _, table := range []string{
 		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
-		"classroom_sessions", "courses",
+		"study_reviews", "classroom_sessions", "courses",
 	} {
 		tag, err := s.db.Q().Exec(ctx, `
 			DELETE FROM `+table+`

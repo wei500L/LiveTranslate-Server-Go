@@ -275,6 +275,51 @@ func noteRecordJSON(n *noteRow) json.RawMessage {
 	return b
 }
 
+type studyReviewRow struct {
+	id             uuid.UUID // == session id
+	userID         uuid.UUID
+	sessionID      uuid.UUID
+	status         string
+	content        string
+	generated      string
+	reviewModel    string
+	generatedAt    *time.Time
+	sourceUpdateAt *time.Time
+	serverVer      int
+	createdAt      time.Time
+	updatedAt      time.Time
+	deletedAt      *time.Time
+}
+
+func fetchStudyReview(ctx context.Context, q store.Q, userID, id uuid.UUID) (*studyReviewRow, error) {
+	r := &studyReviewRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, session_id, status, content, generated_content,
+		       review_model, generated_at, source_updated_at,
+		       server_version, created_at, updated_at, deleted_at
+		FROM study_reviews WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&r.id, &r.userID, &r.sessionID, &r.status, &r.content, &r.generated,
+		&r.reviewModel, &r.generatedAt, &r.sourceUpdateAt,
+		&r.serverVer, &r.createdAt, &r.updatedAt, &r.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func studyReviewRecordJSON(r *studyReviewRow) json.RawMessage {
+	b, _ := json.Marshal(studyReviewRecord{
+		EntityType: EntityStudyReview, ID: r.id.String(), SessionID: r.sessionID.String(),
+		Status: r.status, Content: r.content, GeneratedContent: r.generated,
+		ReviewModel: r.reviewModel, GeneratedAt: r.generatedAt, SourceUpdatedAt: r.sourceUpdateAt,
+		ServerVersion: r.serverVer, Deleted: r.deletedAt != nil,
+	})
+	return b
+}
+
 // --- Change log + ledger helpers ---------------------------------------------
 
 func logChange(ctx context.Context, q store.Q, userID uuid.UUID, entityType string, entityID uuid.UUID, operation string, serverVersion int) error {
@@ -389,8 +434,10 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyFavorite(ctx, q, userID, item)
 	case EntityCourse:
 		return s.applyCourse(ctx, q, userID, item)
-	default:
+	case EntityNote:
 		return s.applyNote(ctx, q, userID, item)
+	default:
+		return s.applyStudyReview(ctx, q, userID, item)
 	}
 }
 
@@ -687,6 +734,33 @@ func (s *Service) cascadeDeleteChildren(ctx context.Context, q store.Q, userID, 
 	}
 	for _, b := range notes {
 		if err := logChange(ctx, q, userID, EntityNote, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
+
+	rows, err = q.Query(ctx, `
+		UPDATE study_reviews
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	var reviews []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		reviews = append(reviews, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range reviews {
+		if err := logChange(ctx, q, userID, EntityStudyReview, b.id, "delete", b.v); err != nil {
 			return err
 		}
 	}
@@ -1554,6 +1628,202 @@ func (s *Service) applyNote(ctx context.Context, q store.Q, userID uuid.UUID, it
 	return res, nil
 }
 
+// applyStudyReview: the post-class AI study review of one session. Entity
+// id == session id (one review per session, structurally). Content merges
+// like chineseText — non-empty incoming wins; there is no product flow
+// that clears a non-empty review back to empty (regeneration keeps the
+// previous result until the new one succeeds). Chunk-level generation
+// progress never syncs — only the structured result does.
+func (s *Service) applyStudyReview(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchStudyReview(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj == nil {
+			// Phantom tombstone (session_id is the entity id itself).
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO study_reviews
+					(id, user_id, session_id, status, server_version,
+					 created_at, updated_at, deleted_at)
+				VALUES ($1, $2, $3, 'failed', 1, now(), now(), now())
+				RETURNING updated_at`, item.EntityID, userID, item.EntityID,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityStudyReview, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj.deletedAt != nil {
+			res := accepted(item, obj.serverVer, obj.updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var version int
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			UPDATE study_reviews
+			SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+			WHERE id = $1 AND user_id = $2
+			RETURNING server_version, updated_at`, item.EntityID, userID,
+		).Scan(&version, &updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityStudyReview, item.EntityID, "delete", version); err != nil {
+			return nil, err
+		}
+		res := accepted(item, version, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// upsert: status required.
+	if p.ReviewStatus == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	// The owning session must exist and be live (id == session id).
+	parent, err := fetchSession(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	if parent == nil || parent.deletedAt != nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj == nil {
+		content := ""
+		if p.ReviewContent != nil {
+			content = *p.ReviewContent
+		}
+		generated := ""
+		if p.ReviewGenerated != nil {
+			generated = *p.ReviewGenerated
+		}
+		reviewModel := ""
+		if p.ReviewModel != nil {
+			reviewModel = *p.ReviewModel
+		}
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO study_reviews
+				(id, user_id, session_id, status, content, generated_content,
+				 review_model, generated_at, source_updated_at,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, item.EntityID, *p.ReviewStatus,
+			content, generated, reviewModel, p.ReviewGeneratedAt, p.ReviewSourceAt,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityStudyReview, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		// Delete-wins: deleted reviews stay deleted.
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyReviewRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, studyReviewRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge: non-empty incoming fields win (status/content/generated/
+	// model); timestamps overwrite when present.
+	status := obj.status
+	if *p.ReviewStatus != "" {
+		status = *p.ReviewStatus
+	}
+	content := obj.content
+	if p.ReviewContent != nil && *p.ReviewContent != "" {
+		content = *p.ReviewContent
+	}
+	generated := obj.generated
+	if p.ReviewGenerated != nil && *p.ReviewGenerated != "" {
+		generated = *p.ReviewGenerated
+	}
+	reviewModel := obj.reviewModel
+	if p.ReviewModel != nil && *p.ReviewModel != "" {
+		reviewModel = *p.ReviewModel
+	}
+	generatedAt := obj.generatedAt
+	if p.ReviewGeneratedAt != nil {
+		generatedAt = p.ReviewGeneratedAt
+	}
+	sourceAt := obj.sourceUpdateAt
+	if p.ReviewSourceAt != nil {
+		sourceAt = p.ReviewSourceAt
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE study_reviews
+		SET status = $3, content = $4, generated_content = $5, review_model = $6,
+		    generated_at = $7, source_updated_at = $8,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, status, content, generated, reviewModel,
+		generatedAt, sourceAt,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityStudyReview, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // --- Pull -------------------------------------------------------------------------
 
 func (s *Service) Pull(ctx context.Context, userID uuid.UUID, cursor int64, limit int) (*PullResponse, error) {
@@ -1667,6 +1937,12 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return noteRecordJSON(obj), nil
+	case EntityStudyReview:
+		obj, err := fetchStudyReview(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyReviewRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -1675,15 +1951,16 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
-	var tail, sessions, entries, courses, notes int
+	var tail, sessions, entries, courses, notes, reviews int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
 			(SELECT count(*) FROM classroom_sessions WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM transcript_entries WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM courses WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM session_notes WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes)
+			(SELECT count(*) FROM session_notes WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_reviews WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews)
 	if err != nil {
 		return nil, err
 	}
@@ -1696,6 +1973,7 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		EntryCount:             entries,
 		CourseCount:            courses,
 		NoteCount:              notes,
+		ReviewCount:            reviews,
 		PendingCount:           0,
 		ServerTime:             time.Now(),
 	}, nil

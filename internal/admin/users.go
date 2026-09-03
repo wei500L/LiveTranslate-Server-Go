@@ -27,6 +27,7 @@ type DashboardStats struct {
 	LiveSessions      int
 	ClassroomSessions int
 	TranscriptEntries int
+	StudyReviews      int
 	RecentSyncAt      *time.Time
 	MailSent          int64 // from the in-process metrics counters
 	MailFailed        int64
@@ -56,10 +57,11 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 			(SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL AND expires_at > now()),
 			(SELECT count(*) FROM classroom_sessions WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM transcript_entries WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM study_reviews WHERE deleted_at IS NULL),
 			(SELECT max(created_at) FROM sync_changes)
 	`).Scan(&d.UsersTotal, &d.UsersActive, &d.UsersPending, &d.UsersSuspended,
 		&d.UsersUnverified, &d.RegisteredToday, &d.DeviceRows, &d.LiveSessions,
-		&d.ClassroomSessions, &d.TranscriptEntries, &d.RecentSyncAt)
+		&d.ClassroomSessions, &d.TranscriptEntries, &d.StudyReviews, &d.RecentSyncAt)
 	if err != nil {
 		return nil, err
 	}

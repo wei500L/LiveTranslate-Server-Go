@@ -25,7 +25,8 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 	// Tombstoned entity rows (children first to keep the deletes cheap even
 	// without FK cascades in the path).
 	for _, table := range []string{
-		"transcript_entries", "bookmarks", "favorite_sessions", "classroom_sessions",
+		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
+		"classroom_sessions", "courses",
 	} {
 		tag, err := s.db.Q().Exec(ctx, `
 			DELETE FROM `+table+`

@@ -148,8 +148,8 @@ func SoftDeleteUser(ctx context.Context, q Q, id uuid.UUID) error {
 // the Python purge_user_sync_data.
 func PurgeUserSyncData(ctx context.Context, q Q, userID uuid.UUID) error {
 	for _, table := range []string{
-		"transcript_entries", "bookmarks", "favorite_sessions",
-		"classroom_sessions", "sync_changes", "processed_operations",
+		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
+		"classroom_sessions", "courses", "sync_changes", "processed_operations",
 	} {
 		if _, err := q.Exec(ctx,
 			`DELETE FROM `+table+` WHERE user_id = $1`, userID); err != nil {

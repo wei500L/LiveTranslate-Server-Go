@@ -81,6 +81,16 @@ type PushPayload struct {
 	EntryID             *uuid.UUID `json:"entryId"`
 	IsBookmarked        *bool      `json:"isBookmarked"`
 	IsFavorite          *bool      `json:"isFavorite"`
+	// session → course reference. Absent (nil) keeps the stored value;
+	// uuid.Nil explicitly CLEARS it (a nil UUID is never a real course id).
+	CourseID *uuid.UUID `json:"courseId"`
+	// course fields (name rides on Title).
+	Teacher     *string    `json:"teacher"`
+	Location    *string    `json:"location"`
+	ColorIndex  *int       `json:"colorIndex"`
+	IsArchived  *bool      `json:"isArchived"`
+	NoteText    *string    `json:"noteText"`
+	AnchorEntry *uuid.UUID `json:"anchorEntryId"`
 }
 
 type PushItem struct {
@@ -139,6 +149,8 @@ type SyncStatusResponse struct {
 	ChangeLogTail          int64     `json:"changeLogTail"`
 	SessionCount           int       `json:"sessionCount"`
 	EntryCount             int       `json:"entryCount"`
+	CourseCount            int       `json:"courseCount"`
+	NoteCount              int       `json:"noteCount"`
 	PendingCount           int       `json:"pendingCount"`
 	ServerTime             time.Time `json:"serverTime"`
 }
@@ -149,11 +161,14 @@ const (
 	EntityEntry    = "entry"
 	EntityBookmark = "bookmark"
 	EntityFavorite = "favorite"
+	EntityCourse   = "course"
+	EntityNote     = "note"
 )
 
 func validEntityType(t string) bool {
 	return t == EntitySession || t == EntityEntry ||
-		t == EntityBookmark || t == EntityFavorite
+		t == EntityBookmark || t == EntityFavorite ||
+		t == EntityCourse || t == EntityNote
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -168,8 +183,11 @@ type sessionRecord struct {
 	AbnormalTermination bool       `json:"abnormalTermination"`
 	SourceLanguage      string     `json:"sourceLanguage,omitempty"`
 	TargetLanguage      string     `json:"targetLanguage,omitempty"`
-	ServerVersion       int        `json:"serverVersion"`
-	Deleted             bool       `json:"deleted"`
+	// Nil (no course) omits the key; the client treats absence as
+	// "standalone session".
+	CourseID      *string `json:"courseId,omitempty"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
 }
 
 type entryRecord struct {
@@ -203,4 +221,26 @@ type favoriteRecord struct {
 	IsFavorite    bool   `json:"isFavorite"`
 	ServerVersion int    `json:"serverVersion"`
 	Deleted       bool   `json:"deleted"`
+}
+
+type courseRecord struct {
+	EntityType    string `json:"entityType"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Teacher       string `json:"teacher"`
+	Location      string `json:"location"`
+	ColorIndex    int    `json:"colorIndex"`
+	IsArchived    bool   `json:"isArchived"`
+	ServerVersion int    `json:"serverVersion"`
+	Deleted       bool   `json:"deleted"`
+}
+
+type noteRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	SessionID     string  `json:"sessionId"`
+	AnchorEntryID *string `json:"anchorEntryId,omitempty"`
+	NoteText      string  `json:"noteText"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
 }

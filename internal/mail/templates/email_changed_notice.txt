@@ -1,0 +1,9 @@
+LiveTranslate 登录邮箱已变更 / Sign-in email changed
+
+你的 LiveTranslate 账号登录邮箱已从 {{.OldEmail}} 变更为 {{.NewEmail}}。
+The sign-in email of your LiveTranslate account changed from {{.OldEmail}} to {{.NewEmail}}.
+
+时间 / Time: {{.LoginAt}}
+
+此后请使用新邮箱登录。除当前设备外，其他设备已退出登录。
+From now on, sign in with the new email. Other devices have been signed out.

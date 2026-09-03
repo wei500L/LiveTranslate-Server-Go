@@ -41,6 +41,7 @@ import (
 	authapi "livetranslate/server/internal/httpapi/auth"
 	"livetranslate/server/internal/httpapi/middleware"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
+	"livetranslate/server/internal/mail"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
 	"livetranslate/server/internal/token"
@@ -176,9 +177,9 @@ type captureMailer struct {
 
 type capturedMail struct{ To, Subject, Body string }
 
-func (c *captureMailer) Send(_ context.Context, to, subject, body string) error {
+func (c *captureMailer) Send(_ context.Context, msg *mail.Message) error {
 	c.mu.Lock()
-	c.sent = append(c.sent, capturedMail{to, subject, body})
+	c.sent = append(c.sent, capturedMail{msg.To, msg.Subject, msg.Text})
 	c.mu.Unlock()
 	return nil
 }
@@ -238,6 +239,9 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *env {
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: 30 * 24 * time.Hour,
 		DevLoginEnabled: false,
+		// Explicit open registration (the capabilities endpoint and the
+		// register gate read this).
+		RegistrationMode: config.RegistrationOpen,
 
 		// Real Argon2id, small parameters: fast enough for hundreds of
 		// test hashes while exercising the identical code paths.
@@ -285,7 +289,7 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *env {
 	accountapi.NewHandler(testDB, authH, authSvc).Register(mux)
 	api := httptest.NewServer(httpapi.Handler(mux, cfg.MaxBodyBytes, 30*time.Second))
 
-	admSvc := admin.NewService(cfg, testDB, auditor)
+	admSvc := admin.NewService(cfg, testDB, auditor, authSvc)
 	admH := admin.NewHandler(cfg, admSvc)
 	admMux := http.NewServeMux()
 	admH.Register(admMux)

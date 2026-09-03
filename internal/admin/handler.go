@@ -13,6 +13,7 @@ import (
 
 	"livetranslate/server/internal/auth"
 	"livetranslate/server/internal/config"
+	"livetranslate/server/internal/metrics"
 	"livetranslate/server/internal/store"
 )
 
@@ -44,6 +45,30 @@ func NewHandler(cfg *config.Config, svc *Service) *Handler {
 			}
 			return *e
 		},
+		"fmtBytes": func(n int64) string {
+			switch {
+			case n >= 1<<20:
+				return strconv.FormatInt(n/(1<<20), 10) + " MB"
+			case n >= 1<<10:
+				return strconv.FormatInt(n/(1<<10), 10) + " KB"
+			default:
+				return strconv.FormatInt(n, 10) + " B"
+			}
+		},
+		"fmtDay": func(t time.Time) string {
+			return t.Local().Format("01-02")
+		},
+		// Bar height for the 7-day trend sparkline (percent of max).
+		"trendHeight": func(count, max int) int {
+			if max <= 0 {
+				return 0
+			}
+			h := count * 40 / max
+			if h < 2 && count > 0 {
+				h = 2
+			}
+			return h
+		},
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Handler{svc: svc, cfg: cfg, tpl: tpl}
 }
@@ -60,6 +85,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /users/{id}/reactivate", h.userAction("reactivate"))
 	mux.HandleFunc("POST /users/{id}/force-logout", h.userAction("force-logout"))
 	mux.HandleFunc("POST /users/{id}/delete", h.userAction("delete"))
+	mux.HandleFunc("POST /users/{id}/devices/{deviceID}/revoke", h.userDeviceAction)
+	mux.HandleFunc("POST /users/{id}/resend-verification", h.userAction("resend-verification"))
+	mux.HandleFunc("POST /users/{id}/send-password-reset", h.userAction("send-password-reset"))
+	mux.HandleFunc("POST /users/{id}/request-deletion", h.userAction("request-deletion"))
+	mux.HandleFunc("POST /users/{id}/cancel-deletion", h.userAction("cancel-deletion"))
 	mux.HandleFunc("GET /invitations", h.invitationsPage)
 	mux.HandleFunc("POST /invitations", h.invitationCreate)
 	mux.HandleFunc("POST /invitations/revoke", h.invitationRevoke)
@@ -174,35 +204,84 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	stats, err := h.svc.Dashboard(r.Context())
+	if err != nil {
+		h.render500(w, r, sess, "dashboard_stats", err)
+		return
+	}
 	events, err := h.svc.AuditFeed(r.Context())
 	if err != nil {
 		h.render500(w, r, sess, "audit_feed", err)
 		return
 	}
+	// In-process counters (mail delivery, API errors) are part of the same
+	// overview page.
+	snap := metrics.Default().Snapshot()
 	h.render(w, http.StatusOK, "dashboard.html", page{
-		Title: "概览", Admin: true, CSRF: sess.CSRFToken, Data: events})
+		Title: "概览", Admin: true, CSRF: sess.CSRFToken,
+		Data: map[string]any{"Stats": stats, "Events": events, "Counters": snap},
+	})
 }
 
 // --- Users ---------------------------------------------------------------------------
+
+// userQueryFromRequest reads the list filters, preserving every parameter
+// for the pager/search form (query conditions survive pagination).
+func userQueryFromRequest(r *http.Request) UserQuery {
+	q := r.URL.Query()
+	pageNo, _ := strconv.Atoi(q.Get("page"))
+	if pageNo < 1 {
+		pageNo = 1
+	}
+	sort := q.Get("sort")
+	if sort != "last_login" && sort != "last_sync" {
+		sort = "created"
+	}
+	status := q.Get("status")
+	switch status {
+	case "active", "pending", "suspended", "pending_deletion", "deleted":
+	default:
+		status = ""
+	}
+	provider := q.Get("provider")
+	switch provider {
+	case "email", "apple", "dev":
+	default:
+		provider = ""
+	}
+	return UserQuery{
+		Search:   q.Get("q"),
+		Status:   status,
+		Provider: provider,
+		Sort:     sort,
+		Page:     pageNo,
+	}
+}
 
 func (h *Handler) usersPage(w http.ResponseWriter, r *http.Request) {
 	sess := h.requireSession(w, r)
 	if sess == nil {
 		return
 	}
-	search := r.URL.Query().Get("q")
-	pageNo, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if pageNo < 1 {
-		pageNo = 1
-	}
-	users, total, err := h.svc.ListUsers(r.Context(), search, pageNo)
+	query := userQueryFromRequest(r)
+	users, total, err := h.svc.ListUsers(r.Context(), query)
 	if err != nil {
 		h.render500(w, r, sess, "list_users", err)
 		return
 	}
+	pages := (total + 24) / 25
+	// Precomputed page list: Go's html/template has no range-over-int and
+	// no arithmetic helpers — computing it here keeps the template dumb.
+	pageNumbers := make([]int, 0, pages)
+	for p := 1; p <= pages; p++ {
+		pageNumbers = append(pageNumbers, p)
+	}
 	h.render(w, http.StatusOK, "users.html", page{
 		Title: "用户", Admin: true, CSRF: sess.CSRFToken,
-		Data: map[string]any{"Users": users, "Total": total, "Page": pageNo, "Q": search},
+		Data: map[string]any{
+			"Users": users, "Total": total, "Page": query.Page, "Pages": pages,
+			"PageNumbers": pageNumbers, "Query": query,
+		},
 	})
 }
 
@@ -265,12 +344,35 @@ func (h *Handler) userAction(action string) http.HandlerFunc {
 			} else {
 				opErr = h.svc.DeleteUser(r.Context(), sess.AdminID, id, reason)
 			}
+		case "resend-verification":
+			opErr = h.svc.ResendVerification(r.Context(), sess.AdminID, id)
+		case "send-password-reset":
+			opErr = h.svc.SendPasswordReset(r.Context(), sess.AdminID, id)
+		case "request-deletion":
+			if reason == "" {
+				reason = "deletion requested by admin"
+			}
+			opErr = h.svc.RequestDeletion(r.Context(), sess.AdminID, id, reason)
+		case "cancel-deletion":
+			opErr = h.svc.CancelDeletion(r.Context(), sess.AdminID, id, reason)
 		}
 		if opErr != nil {
 			if errors.Is(opErr, errConfirmRequired) {
 				h.render(w, http.StatusBadRequest, "error.html", page{
 					Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
 					Error: opErr.Error()})
+				return
+			}
+			if errors.Is(opErr, store.ErrNotFound) {
+				h.render(w, http.StatusBadRequest, "error.html", page{
+					Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
+					Error: "目标用户不存在或不满足该操作的前提条件"})
+				return
+			}
+			if errors.Is(opErr, auth.ErrNoMailTransport) {
+				h.render(w, http.StatusServiceUnavailable, "error.html", page{
+					Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
+					Error: "服务器未配置 SMTP，无法发送邮件（操作未执行）"})
 				return
 			}
 			slog.Error("admin user action failed", "action", action,
@@ -282,6 +384,46 @@ func (h *Handler) userAction(action string) http.HandlerFunc {
 		}
 		http.Redirect(w, r, "/users/"+id.String(), http.StatusSeeOther)
 	}
+}
+
+// userDeviceAction revokes a single device of the user (POST
+// /users/{id}/devices/{deviceID}/revoke).
+func (h *Handler) userDeviceAction(w http.ResponseWriter, r *http.Request) {
+	sess := h.requireSession(w, r)
+	if sess == nil {
+		return
+	}
+	if !h.svc.ValidCSRF(sess, r) {
+		h.render(w, http.StatusForbidden, "error.html", page{
+			Title: "错误", Admin: true, CSRF: sess.CSRFToken, Error: "CSRF 校验失败"})
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	deviceID, err := uuid.Parse(r.PathValue("deviceID"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_ = r.ParseForm()
+	if err := h.svc.RevokeUserDevice(r.Context(), sess.AdminID, id, deviceID,
+		r.PostFormValue("reason")); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.render(w, http.StatusBadRequest, "error.html", page{
+				Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
+				Error: "设备不存在或已被吊销"})
+			return
+		}
+		slog.Error("admin device revoke failed", "path", r.URL.Path, "err", err.Error())
+		h.render(w, http.StatusInternalServerError, "error.html", page{
+			Title: "操作失败", Admin: true, CSRF: sess.CSRFToken,
+			Error: "操作未执行或已回滚"})
+		return
+	}
+	http.Redirect(w, r, "/users/"+id.String(), http.StatusSeeOther)
 }
 
 var errConfirmRequired = &confirmError{}

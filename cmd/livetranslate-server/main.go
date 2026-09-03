@@ -31,6 +31,8 @@ func main() {
 		err = runEnableTOTP(os.Args[2:])
 	case "migrate":
 		err = runMigrate()
+	case "import-sqlite":
+		err = runImportSQLite(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -56,4 +58,7 @@ usage:
   %[1]s enable-totp <username>
                      generate and enable a TOTP secret for an admin
   %[1]s migrate       apply database migrations and exit
+  %[1]s import-sqlite --source db.sqlite [--dry-run | --apply] [--report r.json]
+                     one-shot import of the Python service's SQLite data
+                     (default: dry-run, no writes)
 `

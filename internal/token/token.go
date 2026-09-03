@@ -19,19 +19,27 @@ import (
 var ErrInvalid = errors.New("invalid access token")
 
 type Manager struct {
-	secret     []byte
-	issuer     string
-	accessTTL  time.Duration
-	refreshTTL time.Duration
+	secret []byte
+	// secretPrevious, when set, is accepted for VERIFICATION only (tokens
+	// issued before a key rotation keep working until they expire); new
+	// tokens are always signed with `secret`.
+	secretPrevious []byte
+	issuer         string
+	accessTTL      time.Duration
+	refreshTTL     time.Duration
 }
 
 func NewManager(cfg *config.Config) *Manager {
-	return &Manager{
+	m := &Manager{
 		secret:     []byte(cfg.JWTSecret),
 		issuer:     cfg.JWTIssuer,
 		accessTTL:  cfg.AccessTokenTTL,
 		refreshTTL: cfg.RefreshTokenTTL,
 	}
+	if cfg.JWTSecretPrevious != "" && cfg.JWTSecretPrevious != cfg.JWTSecret {
+		m.secretPrevious = []byte(cfg.JWTSecretPrevious)
+	}
+	return m
 }
 
 // AccessClaims is what a valid access JWT carries. sid is the token id
@@ -59,12 +67,23 @@ func (m *Manager) NewAccessToken(userID, deviceID, role string) (string, time.Du
 	return signed, ttl, err
 }
 
+// VerifyAccessToken accepts the CURRENT signing key and, when configured,
+// the PREVIOUS key (verification only — supports zero-downtime rotation;
+// access tokens are short-lived so the old key retires with them).
 func (m *Manager) VerifyAccessToken(raw string) (*AccessClaims, error) {
+	claims, err := m.parseWithSecret(raw, m.secret)
+	if err != nil && m.secretPrevious != nil {
+		claims, err = m.parseWithSecret(raw, m.secretPrevious)
+	}
+	return claims, err
+}
+
+func (m *Manager) parseWithSecret(raw string, secret []byte) (*AccessClaims, error) {
 	token, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method %v", t.Header["alg"])
 		}
-		return m.secret, nil
+		return secret, nil
 	}, jwt.WithIssuer(m.issuer), jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil || !token.Valid {
 		return nil, ErrInvalid

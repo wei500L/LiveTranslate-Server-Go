@@ -1,0 +1,9 @@
+LiveTranslate 账号删除 / Account deletion
+
+你的 LiveTranslate 账号删除流程已启动：云端课堂记录将被清除，账号将被注销。
+Deletion of your LiveTranslate account was started: cloud classroom records will be purged and the account removed.
+
+请求时间 / Requested at: {{.RequestedAt}}
+
+如果不是你本人操作，请在生效前联系管理员恢复账号。
+If this was not you, contact the administrator to restore the account before it takes effect.

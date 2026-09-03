@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,9 +23,11 @@ import (
 	"livetranslate/server/internal/httpapi/middleware"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
 	"livetranslate/server/internal/mail"
+	"livetranslate/server/internal/metrics"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
 	"livetranslate/server/internal/token"
+	"livetranslate/server/internal/webapp"
 )
 
 func loadOrExit() *config.Config {
@@ -52,10 +56,26 @@ func runMigrate() error {
 	return db.Migrate(cfg.DatabaseURL)
 }
 
+// setupLogging configures the structured logger level before any component
+// constructs its slog.Default()-derived logger.
+func setupLogging(cfg *config.Config) {
+	level := slog.LevelInfo
+	switch strings.ToLower(cfg.LogLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
 // runServe is the /v1 API: token auth (Apple + email/password), sync
 // protocol, account routes. The admin UI is a separate process/listener.
 func runServe() error {
 	cfg := loadOrExit()
+	setupLogging(cfg)
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
 		return fmt.Errorf("migrations: %w", err)
 	}
@@ -92,7 +112,28 @@ func runServe() error {
 	syncapi.NewHandler(cfg, syncSvc, authH).Register(mux)
 	accountapi.NewHandler(st, authH, authSvc).Register(mux)
 
+	// Public web surfaces: reset deep-link landing + AASA.
+	webapp.NewHandler(cfg, st).Register(mux)
+
+	// Internal metrics (aggregate counters only). Gate at the reverse proxy
+	// — the endpoint itself has no auth by design (Prometheus scrape).
+	if cfg.MetricsEnabled {
+		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			_, _ = w.Write([]byte(metrics.Default().Render()))
+		})
+	}
+	// pprof: default OFF. When enabled, answers loopback clients only.
+	if cfg.PprofEnabled {
+		mux.HandleFunc("/debug/pprof/", pprofGate(loopbackOnly(pprofIndex)))
+		mux.HandleFunc("/debug/pprof/cmdline", pprofGate(loopbackOnly(pprofCmdline)))
+		mux.HandleFunc("/debug/pprof/profile", pprofGate(loopbackOnly(pprofProfile)))
+		mux.HandleFunc("/debug/pprof/symbol", pprofGate(loopbackOnly(pprofSymbol)))
+		mux.HandleFunc("/debug/pprof/trace", pprofGate(loopbackOnly(pprofTrace)))
+	}
+
 	var root http.Handler = mux
+	root = countingMiddleware(root)
 	root = httpapi.CORS(cfg.CORSOrigins, root)
 	root = httpapi.Handler(root.(httpapi.Router), cfg.MaxBodyBytes, 30*time.Second)
 
@@ -106,6 +147,10 @@ func runServe() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	syncSvc.StartCleanupLoop(ctx, 24*time.Hour)
+
+	if cfg.AASATeamID == "" {
+		slog.Warn("AASA_TEAM_ID is not configured — /.well-known/apple-app-site-association serves an empty app list (Universal Links will not open the app until a real Team ID is set)")
+	}
 
 	go func() {
 		fmt.Println("api listening on", cfg.ListenAddr, "(dev_login:", cfg.DevLoginEnabled, ")")
@@ -126,11 +171,14 @@ func runServe() error {
 // session stack. It never serves /v1 traffic.
 func runAdmin() error {
 	cfg := loadOrExit()
+	setupLogging(cfg)
 	st := connectOrExit(cfg)
 	defer st.Close()
 
 	auditor := audit.NewRecorder(st)
-	svc := admin.NewService(cfg, st, auditor)
+	mailer := mail.NewSender(cfg)
+	authSvc := auth.NewService(cfg, st, token.NewManager(cfg), mailer, auditor)
+	svc := admin.NewService(cfg, st, auditor, authSvc)
 	h := admin.NewHandler(cfg, svc)
 
 	mux := http.NewServeMux()
@@ -157,4 +205,27 @@ func runAdmin() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// countingMiddleware feeds the /metrics request counters (path + status
+// only — no bodies, no auth headers, no query strings).
+func countingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &countWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		metrics.Inc(metrics.HTTPRequestsTotal)
+		if sw.status >= 500 {
+			metrics.Inc(metrics.HTTP5xxTotal)
+		}
+	})
+}
+
+type countWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *countWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }

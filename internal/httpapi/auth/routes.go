@@ -12,7 +12,6 @@ import (
 	"livetranslate/server/internal/httpapi"
 	"livetranslate/server/internal/httpapi/middleware"
 	"livetranslate/server/internal/store"
-	syncpkg "livetranslate/server/internal/sync"
 )
 
 // httpapi helpers re-exported for brevity in this package.
@@ -235,18 +234,6 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 
 // --- Me & devices -------------------------------------------------------------------
 
-func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
-	ac, ok := h.RequireUser(w, r)
-	if !ok {
-		return
-	}
-	httpapi.WriteJSON(w, http.StatusOK, syncpkg.MeResponse{
-		UserID:       ac.User.ID.String(),
-		DisplayLabel: ac.User.DisplayLabel(),
-		CreatedAt:    ac.User.CreatedAt,
-	})
-}
-
 func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 	ac, ok := h.RequireUser(w, r)
 	if !ok {
@@ -376,6 +363,16 @@ func (h *Handler) mapAuthError(w http.ResponseWriter, r *http.Request, err error
 		httpapi.WriteDetail(w, http.StatusTooManyRequests, "too many attempts, try later")
 	case errors.Is(err, auth.ErrNoMailTransport):
 		httpapi.WriteDetail(w, http.StatusServiceUnavailable, "mail transport unavailable")
+	case errors.Is(err, auth.ErrRegistrationClosed):
+		httpapi.WriteDetail(w, http.StatusForbidden, "registration is currently closed")
+	case errors.Is(err, auth.ErrSameEmail):
+		httpapi.WriteDetail(w, http.StatusBadRequest, "the new email equals the current email")
+	case errors.Is(err, auth.ErrLastLoginMethod):
+		httpapi.WriteDetail(w, http.StatusConflict, "cannot remove the last sign-in method")
+	case errors.Is(err, auth.ErrDisplayNameInvalid):
+		httpapi.WriteDetail(w, http.StatusBadRequest, "display name is too long")
+	case errors.Is(err, auth.ErrAppleAlreadyBound):
+		httpapi.WriteDetail(w, http.StatusConflict, "this Apple ID is already linked to another account")
 	case errors.Is(err, store.ErrReuseDetected),
 		errors.Is(err, store.ErrTokenExpired),
 		errors.Is(err, store.ErrAccountUnavailable),

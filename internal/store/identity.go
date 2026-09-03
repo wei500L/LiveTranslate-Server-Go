@@ -40,6 +40,7 @@ type EmailChallenge struct {
 	UserID       uuid.UUID
 	Purpose      string
 	TokenHash    string
+	TargetEmail  *string // change_email only: the new address being verified
 	ExpiresAt    time.Time
 	AttemptCount int
 	ConsumedAt   *time.Time
@@ -57,10 +58,10 @@ func InvalidatePendingChallenges(ctx context.Context, q Q, userID uuid.UUID, pur
 
 func CreateEmailChallenge(ctx context.Context, q Q, c *EmailChallenge) error {
 	return q.QueryRow(ctx, `
-		INSERT INTO email_challenges (id, user_id, purpose, token_hash, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, now())
+		INSERT INTO email_challenges (id, user_id, purpose, target_email, token_hash, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
 		RETURNING id, created_at`,
-		c.ID, c.UserID, c.Purpose, c.TokenHash, c.ExpiresAt,
+		c.ID, c.UserID, c.Purpose, c.TargetEmail, c.TokenHash, c.ExpiresAt,
 	).Scan(&c.ID, &c.CreatedAt)
 }
 
@@ -68,11 +69,11 @@ func CreateEmailChallenge(ctx context.Context, q Q, c *EmailChallenge) error {
 func LatestLiveChallenge(ctx context.Context, q Q, userID uuid.UUID, purpose string) (*EmailChallenge, error) {
 	c := &EmailChallenge{}
 	err := q.QueryRow(ctx, `
-		SELECT id, user_id, purpose, token_hash, expires_at, attempt_count, consumed_at, created_at
+		SELECT id, user_id, purpose, target_email, token_hash, expires_at, attempt_count, consumed_at, created_at
 		FROM email_challenges
 		WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
 		ORDER BY created_at DESC LIMIT 1`, userID, purpose,
-	).Scan(&c.ID, &c.UserID, &c.Purpose, &c.TokenHash, &c.ExpiresAt, &c.AttemptCount, &c.ConsumedAt, &c.CreatedAt)
+	).Scan(&c.ID, &c.UserID, &c.Purpose, &c.TargetEmail, &c.TokenHash, &c.ExpiresAt, &c.AttemptCount, &c.ConsumedAt, &c.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -101,6 +102,115 @@ func ConsumeChallenge(ctx context.Context, q Q, id uuid.UUID) error {
 	return nil
 }
 
+// --- Login identities (bind/unbind, "sign-in methods") ----------------------
+
+type AuthIdentity struct {
+	ID              uuid.UUID
+	UserID          uuid.UUID
+	Provider        string
+	ProviderSubject string
+	CreatedAt       time.Time
+	LastUsedAt      *time.Time
+}
+
+// ListAuthIdentities returns the user's bound login identities.
+func ListAuthIdentities(ctx context.Context, q Q, userID uuid.UUID) ([]*AuthIdentity, error) {
+	rs, err := q.Query(ctx, `
+		SELECT id, user_id, provider, provider_subject, created_at, last_used_at
+		FROM auth_identities WHERE user_id = $1 ORDER BY provider`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rs.Close()
+	var out []*AuthIdentity
+	for rs.Next() {
+		i := &AuthIdentity{}
+		if err := rs.Scan(&i.ID, &i.UserID, &i.Provider, &i.ProviderSubject, &i.CreatedAt, &i.LastUsedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rs.Err()
+}
+
+// GetAuthIdentityBySubject finds an identity by (provider, subject).
+func GetAuthIdentityBySubject(ctx context.Context, q Q, provider, subject string) (*AuthIdentity, error) {
+	i := &AuthIdentity{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, provider, provider_subject, created_at, last_used_at
+		FROM auth_identities WHERE provider = $1 AND provider_subject = $2`,
+		provider, subject,
+	).Scan(&i.ID, &i.UserID, &i.Provider, &i.ProviderSubject, &i.CreatedAt, &i.LastUsedAt)
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return i, err
+}
+
+// BindAuthIdentity links a provider identity to a user (the unique
+// (provider, provider_subject) constraint arbitrates races).
+func BindAuthIdentity(ctx context.Context, q Q, userID uuid.UUID, provider, subject string) error {
+	_, err := q.Exec(ctx, `
+		INSERT INTO auth_identities (id, user_id, provider, provider_subject, created_at, last_used_at)
+		VALUES ($1, $2, $3, $4, now(), now())`,
+		uuid.New(), userID, provider, subject)
+	return err
+}
+
+// UnbindAuthIdentity removes one provider identity of a user.
+func UnbindAuthIdentity(ctx context.Context, q Q, userID uuid.UUID, provider string) error {
+	ct, err := q.Exec(ctx, `
+		DELETE FROM auth_identities
+		WHERE user_id = $1 AND provider = $2`, userID, provider)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// HasPasswordCredential reports whether the user can sign in with a password.
+func HasPasswordCredential(ctx context.Context, q Q, userID uuid.UUID) (bool, error) {
+	var one int
+	err := q.QueryRow(ctx,
+		`SELECT 1 FROM password_credentials WHERE user_id = $1`, userID).Scan(&one)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// UpdateUserEmail atomically replaces the login email (used by the verified
+// email-change flow).
+func UpdateUserEmail(ctx context.Context, q Q, userID uuid.UUID, email, normalized string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE users SET email = $2, normalized_email = $3, updated_at = now()
+		WHERE id = $1`, userID, email, normalized)
+	return err
+}
+
+// UpdateDisplayName replaces the display name (length enforced by callers).
+func UpdateDisplayName(ctx context.Context, q Q, userID uuid.UUID, displayName string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE users SET display_name = $2, updated_at = now()
+		WHERE id = $1`, userID, displayName)
+	return err
+}
+
+// CountUserDevices returns the user's device rows (revoked included) and
+// the count of devices with a live refresh token.
+func CountUserDevices(ctx context.Context, q Q, userID uuid.UUID) (total, liveSessions int, err error) {
+	err = q.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM devices WHERE user_id = $1),
+			(SELECT count(*) FROM refresh_tokens rt
+				WHERE rt.user_id = $1 AND rt.revoked_at IS NULL AND rt.expires_at > now())`,
+		userID).Scan(&total, &liveSessions)
+	return total, liveSessions, err
+}
+
 // --- Password reset tokens --------------------------------------------------
 
 type PasswordResetToken struct {
@@ -118,6 +228,38 @@ func CreatePasswordResetToken(ctx context.Context, q Q, t *PasswordResetToken) e
 		VALUES ($1, $2, $3, $4, now())
 		RETURNING created_at`,
 		t.ID, t.UserID, t.TokenHash, t.ExpiresAt).Scan(&t.CreatedAt)
+}
+
+// PasswordResetTokenState describes a reset token for the deep-link landing
+// page (valid | expired | used | unknown). The token itself is high-entropy
+// and single-use, so revealing its state by direct query is safe.
+type PasswordResetTokenState struct {
+	Status    string // valid | expired | used | unknown
+	ExpiresAt time.Time
+}
+
+func LookupPasswordResetTokenState(ctx context.Context, q Q, tokenHash string) (*PasswordResetTokenState, error) {
+	s := &PasswordResetTokenState{}
+	err := q.QueryRow(ctx, `
+		SELECT expires_at, consumed_at FROM password_reset_tokens
+		WHERE token_hash = $1`, tokenHash,
+	).Scan(&s.ExpiresAt, &s.ConsumedAt)
+	if err == pgx.ErrNoRows {
+		s.Status = "unknown"
+		return s, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case s.ConsumedAt != nil:
+		s.Status = "used"
+	case s.ExpiresAt.Before(time.Now()):
+		s.Status = "expired"
+	default:
+		s.Status = "valid"
+	}
+	return s, nil
 }
 
 func ConsumePasswordResetToken(ctx context.Context, q Q, tokenHash string) (uuid.UUID, error) {

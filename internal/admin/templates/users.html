@@ -2,27 +2,67 @@
 <div class="card">
   <h1>用户（{{.Data.Total}}）</h1>
   <form method="get" action="/users" class="row">
-    <input type="text" name="q" placeholder="按邮箱前缀或显示名搜索" value="{{.Data.Q}}">
+    <input type="text" name="q" placeholder="邮箱前缀 / 显示名 / 完整 UUID" value="{{.Data.Query.Search}}">
+    <input type="hidden" name="status" value="{{.Data.Query.Status}}">
+    <input type="hidden" name="provider" value="{{.Data.Query.Provider}}">
+    <input type="hidden" name="sort" value="{{.Data.Query.Sort}}">
     <button type="submit">搜索</button>
+  </form>
+  <form method="get" action="/users" class="row" style="margin-top:10px">
+    <select name="status">
+      <option value="">全部状态</option>
+      {{$status := .Data.Query.Status}}
+      <option value="active" {{if eq $status "active"}}selected{{end}}>active</option>
+      <option value="pending" {{if eq $status "pending"}}selected{{end}}>pending（未验证）</option>
+      <option value="suspended" {{if eq $status "suspended"}}selected{{end}}>suspended</option>
+      <option value="pending_deletion" {{if eq $status "pending_deletion"}}selected{{end}}>pending_deletion</option>
+      <option value="deleted" {{if eq $status "deleted"}}selected{{end}}>deleted</option>
+    </select>
+    <select name="provider">
+      <option value="">全部注册方式</option>
+      {{$provider := .Data.Query.Provider}}
+      <option value="email" {{if eq $provider "email"}}selected{{end}}>邮箱</option>
+      <option value="apple" {{if eq $provider "apple"}}selected{{end}}>Apple</option>
+      <option value="dev" {{if eq $provider "dev"}}selected{{end}}>开发者</option>
+    </select>
+    <select name="sort">
+      <option value="created">按注册时间</option>
+      {{$sort := .Data.Query.Sort}}
+      <option value="last_login" {{if eq $sort "last_login"}}selected{{end}}>按最近登录</option>
+      <option value="last_sync" {{if eq $sort "last_sync"}}selected{{end}}>按最近同步</option>
+    </select>
+    <input type="hidden" name="q" value="{{.Data.Query.Search}}">
+    <button type="submit">应用</button>
   </form>
 </div>
 <div class="card">
   <table>
-    <tr><th>邮箱 / 标识</th><th>显示名</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>活跃会话</th><th>条目数</th></tr>
+    <tr><th>邮箱 / 标识</th><th>显示名</th><th>方式</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>最近同步</th><th>活跃会话</th><th>条目数</th></tr>
     {{range .Data.Users}}
     <tr>
       <td><a href="/users/{{.ID}}">{{fmtEmailPtr .Email}}</a></td>
       <td>{{.DisplayName}}</td>
+      <td class="muted">{{.Provider}}</td>
       <td><span class="pill {{.Status}}">{{.Status}}</span></td>
       <td class="muted">{{fmtTime .CreatedAt}}</td>
       <td class="muted">{{fmtTimePtr .LastLoginAt}}</td>
+      <td class="muted">{{fmtTimePtr .LastSyncAt}}</td>
       <td>{{.SessionCount}}</td>
       <td>{{.EntryCount}}</td>
     </tr>
     {{else}}
-    <tr><td colspan="7" class="muted">没有匹配的用户</td></tr>
+    <tr><td colspan="9" class="muted">没有匹配的用户。调整搜索词或筛选条件后重试。</td></tr>
     {{end}}
   </table>
+  {{if gt .Data.Pages 1}}
+  <p class="muted">
+    第 {{.Data.Page}} / {{.Data.Pages}} 页 ·
+    {{range .Data.PageNumbers}}
+      {{if eq . $.Data.Page}}<strong>{{.}}</strong>{{else}}<a href="/users?q={{$.Data.Query.Search}}&status={{$.Data.Query.Status}}&provider={{$.Data.Query.Provider}}&sort={{$.Data.Query.Sort}}&page={{.}}">{{.}}</a>{{end}}
+    {{end}}
+  </p>
+  {{else}}
   <p class="muted">第 {{.Data.Page}} 页 · 每页 25 条</p>
+  {{end}}
 </div>
 {{template "foot" .}}

@@ -1,0 +1,11 @@
+LiveTranslate 新设备登录 / New device sign-in
+
+你的账号刚刚在一台新设备上登录：
+Your LiveTranslate account was just signed in on a new device:
+
+设备 / Device: {{.DeviceName}}
+App 版本 / Version: {{.AppVersion}}
+时间 / Time: {{.LoginAt}}
+
+如果不是你本人操作，建议立即修改密码并退出所有设备。
+If this was not you, change your password and sign out all devices immediately.

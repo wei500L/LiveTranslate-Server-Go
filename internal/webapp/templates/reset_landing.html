@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveTranslate 密码重置</title>
+<style>
+:root { --bg:#f5f6f8; --card:#fff; --ink:#1c2733; --muted:#68778a; --line:#e3e7ee;
+        --brand:#2b5fd9; --danger:#c0392b; --ok:#1e7e4e; --warn:#9a6b0f; }
+* { box-sizing:border-box; }
+body { margin:0; padding:32px 16px; background:var(--bg); color:var(--ink);
+       font:15px/1.6 -apple-system,"PingFang SC","Segoe UI",sans-serif; }
+.card { max-width:480px; margin:0 auto; background:var(--card);
+        border:1px solid var(--line); border-radius:12px; padding:28px; }
+h1 { font-size:19px; margin:0 0 6px; }
+p.sub { margin:0 0 20px; color:var(--muted); font-size:13px; }
+.badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:12px; margin-bottom:14px; }
+.badge.valid   { background:#e3f3ea; color:var(--ok); }
+.badge.expired { background:#fdf3e0; color:var(--warn); }
+.badge.used     { background:#eceff3; color:var(--muted); }
+.badge.invalid { background:#fbe6e2; color:var(--danger); }
+a.btn, a.btn:visited { display:block; background:var(--brand); color:#fff; text-decoration:none;
+        text-align:center; border-radius:8px; padding:13px 18px; font-weight:600; font-size:15px; }
+code.token { display:block; font-family:ui-monospace,Menlo,monospace; font-size:12px; word-break:break-all;
+        background:#eef1f6; border-radius:6px; padding:10px 12px; margin:14px 0; user-select:all; }
+p.note { font-size:12px; color:var(--muted); margin:14px 0 0; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>LiveTranslate 密码重置</h1>
+  <p class="sub">Password reset</p>
+
+  {{if eq .State "valid"}}
+    <span class="badge valid">链接有效</span>
+    <p>在安装了 LiveTranslate 的 iPhone 上点击下方按钮继续重置。如果你正在手机上浏览本页，按钮会直接打开 App 的重置页面。</p>
+    <a class="btn" href="{{.SchemeLink}}">在 App 中打开重置页面 / Open in app</a>
+    <p class="note">没有安装 App？先在 App Store 安装 LiveTranslate，然后重新打开邮件中的链接。</p>
+    <p class="note">也可以手动复制下面的凭证，在 App 的「找回密码」页粘贴：</p>
+    <code class="token">{{.Token}}</code>
+  {{else if eq .State "expired"}}
+    <span class="badge expired">链接已过期</span>
+    <p>这封重置邮件已超过有效期。请在 App 的「登录 · 忘记密码」中重新发起重置，我们会发送一封新的邮件。</p>
+    <p class="note">为安全起见，链接有效期较短且只能使用一次。如果你并未请求重置，无需任何操作。</p>
+  {{else if eq .State "used"}}
+    <span class="badge used">链接已使用</span>
+    <p>该重置链接已被使用过。如果你刚刚完成了重置，请直接用新密码登录；如果不是你操作的，请立即通过「忘记密码」重新设置密码。</p>
+  {{else}}
+    <span class="badge invalid">链接无效</span>
+    <p>这个链接不正确或已失效。请从最新的重置邮件中重新打开链接；旧邮件中的链接会被新链接取代。</p>
+    <p class="note">如果你并未请求重置，无需任何操作，你的密码不会改变。</p>
+  {{end}}
+
+  <p class="note">本页面不包含任何第三方统计或追踪脚本。This page loads no third-party scripts.</p>
+</div>
+</body>
+</html>

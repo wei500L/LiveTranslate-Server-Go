@@ -36,11 +36,28 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-livetranslate}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-livetranslate}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_SECRET_PREVIOUS: ${JWT_SECRET_PREVIOUS:-}
       APPLE_BUNDLE_ID: ${APPLE_BUNDLE_ID:-com.livetranslate.ios}
+      AASA_TEAM_ID: ${AASA_TEAM_ID:-}
+      # Password-reset links / web fallback pages live under this origin.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # Registration policy: open | invite_only | disabled.
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
       # DEV LOGIN: local development against the iOS Debug build only.
       DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-false}
+      DEV_MODE: ${DEV_MODE:-false}
+      APP_ENV: ${APP_ENV:-development}
       TOMBSTONE_RETENTION_DAYS: ${TOMBSTONE_RETENTION_DAYS:-180}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # SMTP: required for registration mails in production.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-LiveTranslate}
+      SMTP_TLS_MODE: ${SMTP_TLS_MODE:-starttls}
+      METRICS_ENABLED: ${METRICS_ENABLED:-false}
     ports:
       # In production remove this mapping and proxy via Caddy/Nginx.
       - "8000:8000"

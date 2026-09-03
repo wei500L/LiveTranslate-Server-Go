@@ -43,6 +43,11 @@ var (
 	ErrResendCooldown     = errors.New("please wait before requesting another code")
 	ErrRateLimited        = errors.New("too many attempts, try later")
 	ErrNoMailTransport    = errors.New("mail transport unavailable")
+	ErrRegistrationClosed = errors.New("registration is currently closed")
+	ErrSameEmail          = errors.New("new email equals the current email")
+	ErrLastLoginMethod    = errors.New("cannot remove the last sign-in method")
+	ErrDisplayNameInvalid = errors.New("display name rejected")
+	ErrAppleAlreadyBound  = errors.New("this Apple ID is already linked to another account")
 )
 
 // Service wires the pieces together.
@@ -158,6 +163,10 @@ func currentParams(cfg *config.Config) password.Params {
 // code, and emails the code. It does NOT issue tokens (email must be
 // verified first). The response never reveals whether the email exists.
 func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string) (*LoginResponse, error) {
+	// Registration policy: the server config is the single source of truth.
+	if s.cfg.RegistrationMode == config.RegistrationDisabled {
+		return nil, ErrRegistrationClosed
+	}
 	email := NormalizeEmail(req.Email)
 	if !ValidEmail(email) {
 		// Malformed address: no account state is touched, no mail leaves.
@@ -182,7 +191,6 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 		return nil, err
 	}
 
-	emailHash := HashPII(email)
 	created := false
 	var plainCode string
 	err = s.db.Tx(ctx, func(tx pgxTx) error {
@@ -215,7 +223,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 			return err
 		}
 		// Invitation gate.
-		if s.cfg.RequireInvitation {
+		if s.cfg.RegistrationMode == config.RegistrationInviteOnly {
 			if req.InvitationCode == "" {
 				return fmt.Errorf("invitation code required")
 			}
@@ -248,7 +256,6 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest, ip string)
 	if err != nil {
 		return nil, err
 	}
-	_ = emailHash
 	// Delivery outside the transaction: a transport failure must not roll
 	// back the challenge — the user can hit resend after the cooldown.
 	if plainCode != "" {
@@ -268,14 +275,22 @@ func domainOf(email string) string {
 // returning the PLAINTEXT code so the caller can mail it after commit.
 // Storage sees only the hash.
 func (s *Service) createChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID) (string, error) {
-	if err := store.InvalidatePendingChallenges(ctx, q, userID, "verify_email"); err != nil {
+	return s.createTargetedChallengeTx(ctx, q, userID, "verify_email", nil)
+}
+
+// createTargetedChallengeTx is the general form: purpose + optional target
+// email (used by the email-change flow, where the code alone is not enough
+// — the challenge row must name the address being verified).
+func (s *Service) createTargetedChallengeTx(ctx context.Context, q store.Q, userID uuid.UUID, purpose string, targetEmail *string) (string, error) {
+	if err := store.InvalidatePendingChallenges(ctx, q, userID, purpose); err != nil {
 		return "", err
 	}
 	code := token.NewEmailCode()
 	ch := &store.EmailChallenge{
-		ID: uuid.New(), UserID: userID, Purpose: "verify_email",
-		TokenHash: token.HashToken(code),
-		ExpiresAt: time.Now().Add(s.cfg.EmailVerifyTTL),
+		ID: uuid.New(), UserID: userID, Purpose: purpose,
+		TargetEmail: targetEmail,
+		TokenHash:   token.HashToken(code),
+		ExpiresAt:   time.Now().Add(s.cfg.EmailVerifyTTL),
 	}
 	return code, store.CreateEmailChallenge(ctx, q, ch)
 }
@@ -283,10 +298,97 @@ func (s *Service) createChallengeTx(ctx context.Context, q store.Q, userID uuid.
 // sendCodeEmail delivers a verification code. Failures are logged, never
 // fatal: the challenge exists and resend is available after the cooldown.
 func (s *Service) sendCodeEmail(ctx context.Context, email, plain string) {
-	body := "Your LiveTranslate verification code is: " + plain + "\n\n" +
-		"It expires in 10 minutes. If you did not request it, ignore this email."
-	if err := s.mailer.Send(ctx, email, "LiveTranslate 验证码 / Verification code", body); err != nil {
+	msg, err := mail.Render(mail.TemplateVerifyCode, &mail.TemplateData{
+		Code:          plain,
+		VerifyMinutes: int(s.cfg.EmailVerifyTTL.Minutes()),
+	})
+	if err != nil {
+		s.log.Error("verification mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = email
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		// Never log the body — it carries the code.
 		s.log.Error("verification email delivery failed", "err", err.Error())
+	}
+}
+
+// sendEmailChangeCode delivers the code that verifies a NEW login email.
+func (s *Service) sendEmailChangeCode(ctx context.Context, newEmail, oldEmail, plain string) {
+	msg, err := mail.Render(mail.TemplateEmailChange, &mail.TemplateData{
+		Code: plain, OldEmail: oldEmail,
+		VerifyMinutes: int(s.cfg.EmailVerifyTTL.Minutes()),
+	})
+	if err != nil {
+		s.log.Error("email-change mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = newEmail
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("email-change code delivery failed", "err", err.Error())
+	}
+}
+
+// sendNewDeviceNotice informs the account about a first-time device.
+func (s *Service) sendNewDeviceNotice(ctx context.Context, email, deviceName, appVersion string) {
+	msg, err := mail.Render(mail.TemplateNewDevice, &mail.TemplateData{
+		DeviceName: deviceName, AppVersion: appVersion,
+		LoginAt: time.Now().Format("2006-01-02 15:04 MST"),
+	})
+	if err != nil {
+		s.log.Error("new-device mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = email
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("new-device notice delivery failed", "err", err.Error())
+	}
+}
+
+// sendPasswordChangedNotice goes out after a successful password change.
+func (s *Service) sendPasswordChangedNotice(ctx context.Context, email string) {
+	msg, err := mail.Render(mail.TemplatePasswordChange, &mail.TemplateData{
+		LoginAt: time.Now().Format("2006-01-02 15:04 MST"),
+	})
+	if err != nil {
+		s.log.Error("password-change mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = email
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("password-change notice delivery failed", "err", err.Error())
+	}
+}
+
+// sendEmailChangedNotice informs the OLD address after a verified change.
+func (s *Service) sendEmailChangedNotice(ctx context.Context, oldEmail, newEmail string) {
+	msg, err := mail.Render(mail.TemplateEmailChangedNotice, &mail.TemplateData{
+		OldEmail: oldEmail, NewEmail: newEmail,
+		LoginAt: time.Now().Format("2006-01-02 15:04 MST"),
+	})
+	if err != nil {
+		s.log.Error("email-changed mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = oldEmail
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("email-changed notice delivery failed", "err", err.Error())
+	}
+}
+
+// sendAccountDeletionNotice goes out when deletion is started (admin or
+// user-initiated) — the address may stop resolving afterwards.
+func (s *Service) sendAccountDeletionNotice(ctx context.Context, email string) {
+	msg, err := mail.Render(mail.TemplateAccountDeletion, &mail.TemplateData{
+		RequestedAt: time.Now().Format("2006-01-02 15:04 MST"),
+	})
+	if err != nil {
+		s.log.Error("account-deletion mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = email
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("account-deletion notice delivery failed", "err", err.Error())
 	}
 }
 
@@ -374,7 +476,7 @@ func (s *Service) VerifyEmail(ctx context.Context, req *VerifyEmailRequest, ip s
 		if err != nil {
 			return err
 		}
-		resp, err = s.issueTokensForDevice(ctx, q, fresh, req.Device2(), ip)
+		resp, err = s.issueTokensForDevice(ctx, q, fresh, req.Device, ip)
 		return err
 	})
 	if err != nil {
@@ -382,9 +484,6 @@ func (s *Service) VerifyEmail(ctx context.Context, req *VerifyEmailRequest, ip s
 	}
 	return resp, nil
 }
-
-// Device2 returns the device payload carried by the verify request.
-func (r *VerifyEmailRequest) Device2() syncpkg.DeviceInfo { return r.Device }
 
 // Resend issues a new code if allowed. Response is always generic.
 func (s *Service) Resend(ctx context.Context, req *ResendRequest, ip string) error {
@@ -462,6 +561,7 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest, ip string) (*Log
 	}
 
 	var resp *LoginResponse
+	newDevice := false
 	err = s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		// Transparent re-hash on parameter upgrade.
@@ -476,18 +576,32 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest, ip string) (*Log
 		uid := u.ID
 		_ = store.RecordLoginEvent(ctx, q, &uid, emailHash, req.Device.ClientDeviceID, ipHash, "success")
 		var verr error
-		resp, verr = s.issueTokensForDevice(ctx, q, u, req.Device, ip)
+		resp, verr = s.issueTokensForDeviceTx(ctx, q, u, req.Device, ip, &newDevice)
 		return verr
 	})
 	if err != nil {
 		return nil, err
 	}
+	// First sign-in from a device the account has never seen → notice mail.
+	// Best-effort, after commit; Apple/dev-only accounts have no address.
+	if newDevice && u.Email != nil && *u.Email != "" {
+		s.sendNewDeviceNotice(ctx, *u.Email, req.Device.DisplayName, req.Device.AppVersion)
+	}
 	return resp, nil
 }
 
 // issueTokensForDevice creates/refreshes the device row and issues a token
-// pair. Runs INSIDE a transaction (q is a tx-bound query interface).
+// pair. Runs INSIDE a transaction (q is a tx-bound query interface). A
+// first-time device triggers the new-device notice (mailed after commit —
+// see the tx-side flag plumbing below).
 func (s *Service) issueTokensForDevice(ctx context.Context, q store.Q, u *store.User, device syncpkg.DeviceInfo, ip string) (*LoginResponse, error) {
+	return s.issueTokensForDeviceTx(ctx, q, u, device, ip, nil)
+}
+
+// issueTokensForDeviceTx is the full form; newDevice (when non-nil) is set
+// to true when the device row was newly created, so the caller can mail the
+// notice only after a successful commit.
+func (s *Service) issueTokensForDeviceTx(ctx context.Context, q store.Q, u *store.User, device syncpkg.DeviceInfo, ip string, newDevice *bool) (*LoginResponse, error) {
 	if u.Status != "active" || u.DeletedAt != nil {
 		return nil, ErrSuspended
 	}
@@ -498,9 +612,12 @@ func (s *Service) issueTokensForDevice(ctx context.Context, q store.Q, u *store.
 	if clientDeviceID == "" {
 		clientDeviceID = "verify-" + config.RandomHex(8)
 	}
-	dev, err := store.GetOrCreateDevice(ctx, q, u.ID, clientDeviceID, device.DisplayName, device.AppVersion)
+	dev, created, err := store.GetOrCreateDevice(ctx, q, u.ID, clientDeviceID, device.DisplayName, device.AppVersion)
 	if err != nil {
 		return nil, err
+	}
+	if newDevice != nil {
+		*newDevice = created
 	}
 	access, ttl, err := s.tokens.NewAccessToken(u.ID.String(), dev.ID.String(), u.Role)
 	if err != nil {
@@ -670,13 +787,28 @@ func (s *Service) ForgotPassword(ctx context.Context, rawEmail, ip string) error
 		return err
 	}
 	if plain != "" {
-		body := "Reset your LiveTranslate password with this token (valid 30 minutes):\n\n" +
-			plain + "\n\nIf you did not request this, ignore this email — your password is unchanged."
-		if err := s.mailer.Send(ctx, email, "LiveTranslate 密码重置 / Password reset", body); err != nil {
-			s.log.Error("reset email delivery failed", "err", err.Error())
-		}
+		s.sendResetEmail(ctx, email, plain)
 	}
 	return nil
+}
+
+// sendResetEmail renders the password-reset mail. The HTTPS link comes
+// from PUBLIC_BASE_URL; when no public URL is configured the mail carries
+// the bare token instead (legacy manual-paste flow).
+func (s *Service) sendResetEmail(ctx context.Context, email, plain string) {
+	link := s.cfg.ResetLinkURL(plain)
+	msg, err := mail.Render(mail.TemplatePasswordReset, &mail.TemplateData{
+		Code: plain, Link: link,
+		ResetLinkMinutes: int(s.cfg.PasswordResetTTL.Minutes()),
+	})
+	if err != nil {
+		s.log.Error("reset mail render failed", "err", err.Error())
+		return
+	}
+	msg.To = email
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.log.Error("reset email delivery failed", "err", err.Error())
+	}
 }
 
 // ResetPassword consumes the token, re-hashes the new password and revokes
@@ -736,7 +868,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentDeviceID uu
 	if err != nil {
 		return err
 	}
-	return s.db.Tx(ctx, func(tx pgxTx) error {
+	if err := s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		if err := store.UpsertPasswordCredential(ctx, q, userID, newHash); err != nil {
 			return err
@@ -748,7 +880,14 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentDeviceID uu
 		uid := userID
 		return s.audit.Record(ctx, q, "user", &uid, audit.ActionPasswordChange, &uid, "", HashPII(ip), nil,
 			map[string]string{"other_sessions_revoked": "true"})
-	})
+	}); err != nil {
+		return err
+	}
+	// Security notice after commit (best-effort).
+	if u.Email != nil && *u.Email != "" {
+		s.sendPasswordChangedNotice(ctx, *u.Email)
+	}
+	return nil
 }
 
 func deref(sp *string) string {
@@ -904,6 +1043,20 @@ func (s *Service) RevokeDevice(ctx context.Context, userID, deviceID uuid.UUID, 
 
 // DeleteAccount purges sync data, revokes tokens and soft-deletes the user.
 func (s *Service) DeleteAccount(ctx context.Context, userID uuid.UUID, ip string) error {
+	if err := s.deleteAccountTx(ctx, userID, ip, "user"); err != nil {
+		return err
+	}
+	// Deletion notice after commit (best-effort; the address may already
+	// be going away, which is fine).
+	if u, err := store.GetUserByID(ctx, s.db.Q(), userID); err == nil && u != nil && u.Email != nil && *u.Email != "" {
+		s.sendAccountDeletionNotice(ctx, *u.Email)
+	}
+	return nil
+}
+
+// deleteAccountTx is the transactional core shared by the self-service and
+// admin deletion paths.
+func (s *Service) deleteAccountTx(ctx context.Context, userID uuid.UUID, ip, actorType string) error {
 	return s.db.Tx(ctx, func(tx pgxTx) error {
 		q := store.TxQ(tx)
 		u, err := store.GetUserByID(ctx, q, userID)
@@ -921,7 +1074,7 @@ func (s *Service) DeleteAccount(ctx context.Context, userID uuid.UUID, ip string
 			return err
 		}
 		uid := userID
-		return s.audit.Record(ctx, q, "user", &uid, audit.ActionUserDeleted, &uid, "", HashPII(ip), before,
+		return s.audit.Record(ctx, q, actorType, &uid, audit.ActionUserDeleted, &uid, "", HashPII(ip), before,
 			map[string]string{"status": "deleted"})
 	})
 }
@@ -935,5 +1088,445 @@ func (s *Service) PurgeCloudData(ctx context.Context, userID uuid.UUID, ip strin
 		}
 		uid := userID
 		return s.audit.Record(ctx, q, "user", &uid, audit.ActionCloudDataPurge, &uid, "", HashPII(ip), nil, nil)
+	})
+}
+
+// --- Profile management (PATCH /v1/me, email change, Apple bind) -------------
+
+// MaxDisplayNameLen bounds the display name (the column allows 128).
+const MaxDisplayNameLen = 64
+
+// CleanDisplayName collapses runs of whitespace and trims. The result is
+// either empty (→ the account keeps no name) or a single-line value.
+func CleanDisplayName(raw string) string {
+	fields := strings.Fields(raw)
+	return strings.Join(fields, " ")
+}
+
+// UpdateProfile updates the display name. Role, status and user id are
+// never accepted from the wire (the handler decodes a purpose-built DTO).
+func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, displayName string, ip string) (*syncpkg.PublicUser, error) {
+	name := CleanDisplayName(displayName)
+	if len([]rune(name)) > MaxDisplayNameLen {
+		return nil, ErrDisplayNameInvalid
+	}
+	if err := s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		if err := store.UpdateDisplayName(ctx, q, userID, name); err != nil {
+			return err
+		}
+		uid := userID
+		return s.audit.Record(ctx, q, "user", &uid, audit.ActionProfileUpdate, &uid, "", HashPII(ip), nil,
+			map[string]string{"display_name_len": fmt.Sprintf("%d", len(name))})
+	}); err != nil {
+		return nil, err
+	}
+	u, err := store.GetUserByID(ctx, s.db.Q(), userID)
+	if err != nil {
+		return nil, err
+	}
+	return publicUser(u), nil
+}
+
+// EmailChangeState describes a pending login-email change (nil-safe).
+type EmailChangeState struct {
+	TargetEmail string    `json:"targetEmail"`
+	CreatedAt   time.Time `json:"createdAt"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+// RequestEmailChange re-authenticates with the current password, verifies
+// the new address is available, then mails a verification code TO THE NEW
+// ADDRESS. The current email stays fully valid until the code is consumed.
+func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, currentPassword, newEmailRaw string, ip string) (*EmailChangeState, error) {
+	if !s.mailer.Configured() && !s.cfg.DevMode {
+		return nil, ErrNoMailTransport
+	}
+	newEmail := NormalizeEmail(newEmailRaw)
+	if !ValidEmail(newEmail) {
+		return nil, ErrBadCode // generic: no enumeration surface here, but shape stays uniform
+	}
+	q0 := s.db.Q()
+	u, err := store.GetUserByID(ctx, q0, userID)
+	if err != nil || u == nil || u.DeletedAt != nil || u.Status != "active" {
+		return nil, ErrInvalidCredentials
+	}
+	if u.NormalizedEmail != nil && *u.NormalizedEmail == newEmail {
+		return nil, ErrSameEmail
+	}
+	hash, _, err := store.GetPasswordHash(ctx, q0, userID)
+	if err != nil {
+		password.VerifyDummy(currentParams(s.cfg))
+		return nil, ErrInvalidCredentials
+	}
+	ok, err := password.Verify(currentPassword, hash)
+	if err != nil || !ok {
+		return nil, ErrInvalidCredentials
+	}
+
+	state := &EmailChangeState{}
+	var plain string
+	err = s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		// Availability re-check INSIDE the transaction (the unique partial
+		// index is the final arbiter on commit).
+		existing, err := store.GetUserByNormalizedEmail(ctx, q, newEmail)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if existing != nil && existing.DeletedAt == nil && existing.ID != userID {
+			return ErrEmailTaken
+		}
+		// Resend cooldown on the change_email purpose.
+		if ch, err := store.LatestLiveChallenge(ctx, q, userID, "change_email"); err == nil && ch != nil {
+			if time.Since(ch.CreatedAt) < s.cfg.ResendCooldown {
+				return ErrResendCooldown
+			}
+		}
+		target := newEmail
+		plain, err = s.createTargetedChallengeTx(ctx, q, userID, "change_email", &target)
+		if err != nil {
+			return err
+		}
+		if ch, err := store.LatestLiveChallenge(ctx, q, userID, "change_email"); err == nil && ch != nil {
+			state.TargetEmail, state.CreatedAt, state.ExpiresAt = newEmail, ch.CreatedAt, ch.ExpiresAt
+		}
+		uid := userID
+		return s.audit.Record(ctx, q, "user", &uid, audit.ActionEmailChangeStart, &uid, "", HashPII(ip), nil,
+			map[string]string{"email_domain": domainOf(newEmail)})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if plain != "" {
+		s.sendEmailChangeCode(ctx, newEmail, deref(u.NormalizedEmail), plain)
+	}
+	return state, nil
+}
+
+// VerifyEmailChange consumes the code, atomically swaps the normalized
+// email, revokes every OTHER device's session and re-issues the CURRENT
+// device's tokens (the caller passes the device from the access token).
+// Cloud classroom data is untouched — the user id does not change.
+func (s *Service) VerifyEmailChange(ctx context.Context, userID, currentDeviceID uuid.UUID, code string, device syncpkg.DeviceInfo, ip string) (*LoginResponse, error) {
+	var resp *LoginResponse
+	var oldEmail, newEmail string
+	err := s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil || u == nil || u.DeletedAt != nil || u.Status != "active" {
+			return ErrBadCode
+		}
+		oldEmail = deref(u.NormalizedEmail)
+		ch, err := store.LatestLiveChallenge(ctx, q, userID, "change_email")
+		if err != nil || ch == nil || ch.TargetEmail == nil {
+			return ErrBadCode
+		}
+		newEmail = *ch.TargetEmail
+		if time.Now().After(ch.ExpiresAt) {
+			return ErrBadCode
+		}
+		if ch.AttemptCount >= 5 {
+			return ErrTooManyAttempts
+		}
+		if token.HashToken(strings.TrimSpace(code)) != ch.TokenHash {
+			// Survive the rollback (same discipline as VerifyEmail).
+			_, _ = store.BumpChallengeAttempt(ctx, s.db.Q(), ch.ID)
+			return ErrBadCode
+		}
+		// Final availability check inside the consuming transaction.
+		existing, err := store.GetUserByNormalizedEmail(ctx, q, newEmail)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if existing != nil && existing.ID != userID && existing.DeletedAt == nil {
+			return ErrEmailTaken
+		}
+		if err := store.ConsumeChallenge(ctx, q, ch.ID); err != nil {
+			return ErrBadCode
+		}
+		if err := store.UpdateUserEmail(ctx, q, userID, newEmail, newEmail); err != nil {
+			return err
+		}
+		// Other devices lose their sessions; this device gets a fresh pair.
+		if err := store.RevokeAllUserRefreshTokensExceptDevice(ctx, q, userID, currentDeviceID); err != nil {
+			return err
+		}
+		fresh, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		resp, err = s.issueTokensForDevice(ctx, q, fresh, device, ip)
+		if err != nil {
+			return err
+		}
+		uid := userID
+		return s.audit.Record(ctx, q, "user", &uid, audit.ActionEmailChanged, &uid, "", HashPII(ip),
+			map[string]string{"email_domain": domainOf(oldEmail)},
+			map[string]string{"email_domain": domainOf(newEmail)})
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Notice to the OLD address after commit (best-effort).
+	if oldEmail != "" && oldEmail != newEmail {
+		s.sendEmailChangedNotice(ctx, oldEmail, newEmail)
+	}
+	return resp, nil
+}
+
+// BindApple links a VERIFIED Apple identity (caller verifies the token and
+// passes the extracted subject) to the signed-in account. The identity must
+// not already belong to another user.
+func (s *Service) BindApple(ctx context.Context, userID uuid.UUID, appleSubject string, ip string) error {
+	if appleSubject == "" {
+		return ErrInvalidCredentials
+	}
+	return s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		// Subject already linked to someone (or to a tombstoned account)?
+		other, err := store.GetUserByAppleSubject(ctx, q, appleSubject)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if other != nil && other.ID != userID && other.DeletedAt == nil {
+			return ErrAppleAlreadyBound
+		}
+		if other != nil && other.ID != userID {
+			// Tombstoned account still owns the subject: freeing it would
+			// resurrect login continuity for a deleted account.
+			return ErrAppleAlreadyBound
+		}
+		if err := store.BindAuthIdentity(ctx, q, userID, "apple", appleSubject); err != nil {
+			return err
+		}
+		if _, err := q.Exec(ctx, `UPDATE users SET apple_subject = $2, updated_at = now() WHERE id = $1`,
+			userID, appleSubject); err != nil {
+			return err
+		}
+		uid := userID
+		return s.audit.Record(ctx, q, "user", &uid, audit.ActionAppleBind, &uid, "", HashPII(ip), nil, nil)
+	})
+}
+
+// UnbindApple removes the Apple sign-in method. Refused when it is the
+// ONLY remaining way into the account (no password credential exists) —
+// the password must be set first.
+func (s *Service) UnbindApple(ctx context.Context, userID uuid.UUID, currentPassword string, ip string) error {
+	q0 := s.db.Q()
+	hash, _, err := store.GetPasswordHash(ctx, q0, userID)
+	if err != nil {
+		password.VerifyDummy(currentParams(s.cfg))
+		return ErrInvalidCredentials
+	}
+	ok, err := password.Verify(currentPassword, hash)
+	if err != nil || !ok {
+		return ErrInvalidCredentials
+	}
+	return s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		if err := store.UnbindAuthIdentity(ctx, q, userID, "apple"); err != nil {
+			return err // includes ErrNotFound when nothing was bound
+		}
+		if _, err := q.Exec(ctx, `UPDATE users SET apple_subject = NULL, updated_at = now() WHERE id = $1`,
+			userID); err != nil {
+			return err
+		}
+		uid := userID
+		return s.audit.Record(ctx, q, "user", &uid, audit.ActionAppleUnbind, &uid, "", HashPII(ip), nil, nil)
+	})
+}
+
+// MeProfile is the enriched /v1/me payload: identity, verification state,
+// sign-in methods and session counts (drives the iOS 账号与安全 page).
+type MeProfile struct {
+	UserID        string     `json:"userId"`
+	DisplayLabel  string     `json:"displayLabel"`
+	DisplayName   string     `json:"displayName"`
+	Email         *string    `json:"email,omitempty"`
+	EmailVerified bool       `json:"emailVerified"`
+	Providers     []string   `json:"providers"`
+	HasPassword   bool       `json:"hasPassword"`
+	AppleBound    bool       `json:"appleBound"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	LastLoginAt   *time.Time `json:"lastLoginAt,omitempty"`
+	DeviceCount   int        `json:"deviceCount"`
+	LiveSessions  int        `json:"liveSessions"`
+}
+
+// GetMeProfile assembles the enriched profile for the signed-in user.
+func (s *Service) GetMeProfile(ctx context.Context, userID uuid.UUID) (*MeProfile, error) {
+	q := s.db.Q()
+	u, err := store.GetUserByID(ctx, q, userID)
+	if err != nil {
+		return nil, err
+	}
+	providers := []string{}
+	hasPassword := false
+	if ok, _ := store.HasPasswordCredential(ctx, q, userID); ok {
+		hasPassword = true
+		providers = append(providers, "password")
+	}
+	identities, _ := store.ListAuthIdentities(ctx, q, userID)
+	appleBound := false
+	for _, id := range identities {
+		if id.Provider == "apple" {
+			appleBound = true
+			providers = append(providers, "apple")
+		}
+	}
+	if u.AppleSubject != nil && *u.AppleSubject != "" {
+		appleBound = true
+		if !contains(providers, "apple") {
+			providers = append(providers, "apple")
+		}
+	}
+	total, live, err := store.CountUserDevices(ctx, q, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &MeProfile{
+		UserID:        u.ID.String(),
+		DisplayLabel:  u.DisplayLabel(),
+		DisplayName:   u.DisplayName,
+		Email:         u.Email,
+		EmailVerified: u.EmailVerifiedAt != nil,
+		Providers:     providers,
+		HasPassword:   hasPassword,
+		AppleBound:    appleBound,
+		CreatedAt:     u.CreatedAt,
+		LastLoginAt:   u.LastLoginAt,
+		DeviceCount:   total,
+		LiveSessions:  live,
+	}, nil
+}
+
+func contains(list []string, v string) bool {
+	for _, item := range list {
+		if item == v {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Admin-facing helpers (mail issuing, deletion scheduling) ------------------
+
+// IssueVerificationForUser (admin): create a fresh verify_email code for a
+// pending user and mail it. Returns false when the user is not pending.
+func (s *Service) IssueVerificationForUser(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if !s.mailer.Configured() && !s.cfg.DevMode {
+		return false, ErrNoMailTransport
+	}
+	var plain, email string
+	err := s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		if u.Status != "pending" || u.DeletedAt != nil || u.Email == nil {
+			return store.ErrNotFound
+		}
+		email = *u.Email
+		plain, err = s.createChallengeTx(ctx, q, userID)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	if plain != "" {
+		s.sendCodeEmail(ctx, email, plain)
+	}
+	return true, nil
+}
+
+// IssuePasswordResetForUser (admin): create a reset token and mail the
+// reset link, bypassing the user-driven cooldown (the admin IS the
+// escalation path). Returns false when the account cannot reset.
+func (s *Service) IssuePasswordResetForUser(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if !s.mailer.Configured() && !s.cfg.DevMode {
+		return false, ErrNoMailTransport
+	}
+	var plain, email string
+	err := s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		if u.DeletedAt != nil || u.Status != "active" || u.EmailVerifiedAt == nil || u.Email == nil {
+			return store.ErrNotFound
+		}
+		email = *u.Email
+		plain = token.NewOpaqueToken()
+		t := &store.PasswordResetToken{
+			ID: uuid.New(), UserID: userID, TokenHash: token.HashToken(plain),
+			ExpiresAt: time.Now().Add(s.cfg.PasswordResetTTL),
+		}
+		return store.CreatePasswordResetToken(ctx, q, t)
+	})
+	if err != nil {
+		return false, err
+	}
+	if plain != "" {
+		s.sendResetEmail(ctx, email, plain)
+	}
+	return true, nil
+}
+
+// StartAccountDeletion (admin): schedule deletion (status pending_deletion)
+// and revoke every session immediately. A later CancelAccountDeletion can
+// still restore the account; the purge itself happens through DeleteUser.
+func (s *Service) StartAccountDeletion(ctx context.Context, adminID, userID uuid.UUID, reason, ip string) error {
+	if err := s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		if u.DeletedAt != nil {
+			return store.ErrNotFound
+		}
+		if _, err := q.Exec(ctx, `
+			UPDATE users SET status = 'pending_deletion',
+				deletion_requested_at = now(), updated_at = now()
+			WHERE id = $1`, userID); err != nil {
+			return err
+		}
+		if err := store.RevokeAllUserRefreshTokens(ctx, q, userID); err != nil {
+			return err
+		}
+		aid, uid := adminID, userID
+		return s.audit.Record(ctx, q, "admin", &aid, audit.ActionUserDeleteStart, &uid, reason, HashPII(ip),
+			map[string]string{"status": u.Status}, map[string]string{"status": "pending_deletion"})
+	}); err != nil {
+		return err
+	}
+	if u, err := store.GetUserByID(ctx, s.db.Q(), userID); err == nil && u != nil && u.Email != nil && *u.Email != "" {
+		s.sendAccountDeletionNotice(ctx, *u.Email)
+	}
+	return nil
+}
+
+// CancelAccountDeletion (admin): restore a pending_deletion account.
+func (s *Service) CancelAccountDeletion(ctx context.Context, adminID, userID uuid.UUID, reason, ip string) error {
+	return s.db.Tx(ctx, func(tx pgxTx) error {
+		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		if u.Status != "pending_deletion" || u.DeletedAt != nil {
+			return store.ErrNotFound
+		}
+		if _, err := q.Exec(ctx, `
+			UPDATE users SET status = 'active', deletion_requested_at = NULL, updated_at = now()
+			WHERE id = $1`, userID); err != nil {
+			return err
+		}
+		aid, uid := adminID, userID
+		return s.audit.Record(ctx, q, "admin", &aid, audit.ActionUserDeleteCancel, &uid, reason, HashPII(ip),
+			map[string]string{"status": "pending_deletion"}, map[string]string{"status": "active"})
 	})
 }

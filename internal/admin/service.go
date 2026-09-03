@@ -27,23 +27,27 @@ var (
 // Service implements admin authentication and the user/invitation/audit
 // operations. It deliberately shares NOTHING with the /v1 token stack: no
 // JWTs, no user accounts — admins live in their own table with cookie
-// sessions.
+// sessions. The auth service reference exists ONLY for the admin-issued
+// mail flows (resend verification / send password reset) and the deletion
+// scheduling — it is never used to impersonate or sign in a user.
 type Service struct {
 	cfg   *config.Config
 	db    *store.DB
 	audit *audit.Recorder
+	auth  *auth.Service
 	log   *slog.Logger
 }
 
-func NewService(cfg *config.Config, db *store.DB, auditor *audit.Recorder) *Service {
-	return &Service{cfg: cfg, db: db, audit: auditor, log: slog.Default().With("component", "admin")}
+func NewService(cfg *config.Config, db *store.DB, auditor *audit.Recorder, authSvc *auth.Service) *Service {
+	return &Service{cfg: cfg, db: db, audit: auditor, auth: authSvc,
+		log: slog.Default().With("component", "admin")}
 }
 
 const sessionCookie = "lt_admin_session"
 
 // Login verifies username + password (+ TOTP when configured) and creates a
 // cookie session. It returns the opaque session token and the CSRF token;
-// the HTTP layer turns the former into the Secure/HttpOnly/SameSite cookie.
+// the HTTP layer turns the former into a Secure/HttpOnly/SameSite cookie.
 func (s *Service) Login(ctx context.Context, username, totpCode, passwd, ipHash, userAgent string) (sessionToken, csrfToken string, err error) {
 	q := s.db.Q()
 	adm, err := GetAdminByUsername(ctx, q, username)
@@ -193,11 +197,63 @@ func (s *Service) ForceLogout(ctx context.Context, adminID, userID uuid.UUID, re
 	})
 }
 
+// RevokeUserDevice signs out ONE device of the user.
+func (s *Service) RevokeUserDevice(ctx context.Context, adminID, userID, deviceID uuid.UUID, reason string) error {
+	if err := s.db.Tx(ctx, func(tx pgx.Tx) error {
+		q := store.TxQ(tx)
+		return RevokeUserDevice(ctx, q, userID, deviceID)
+	}); err != nil {
+		return err
+	}
+	return s.auditAdmin(ctx, adminID, audit.ActionAdminRevokeDevice, &userID, reason)
+}
+
+// ResendVerification re-issues the email-verification code for a pending
+// user (admin escalation path; bypasses the user-driven cooldown).
+func (s *Service) ResendVerification(ctx context.Context, adminID, userID uuid.UUID) error {
+	ok, err := s.auth.IssueVerificationForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return store.ErrNotFound
+	}
+	return s.auditAdmin(ctx, adminID, audit.ActionAdminResendVerify, &userID, "")
+}
+
+// SendPasswordReset mails a fresh reset link for the user.
+func (s *Service) SendPasswordReset(ctx context.Context, adminID, userID uuid.UUID) error {
+	ok, err := s.auth.IssuePasswordResetForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return store.ErrNotFound
+	}
+	return s.auditAdmin(ctx, adminID, audit.ActionAdminSendReset, &userID, "")
+}
+
+// RequestDeletion schedules account deletion (pending_deletion + session
+// revocation + notice mail).
+func (s *Service) RequestDeletion(ctx context.Context, adminID, userID uuid.UUID, reason string) error {
+	return s.auth.StartAccountDeletion(ctx, adminID, userID, reason, "")
+}
+
+// CancelDeletion restores a pending_deletion account.
+func (s *Service) CancelDeletion(ctx context.Context, adminID, userID uuid.UUID, reason string) error {
+	return s.auth.CancelAccountDeletion(ctx, adminID, userID, reason, "")
+}
+
 // DeleteUser purges sync data, revokes tokens and soft-deletes the account
 // (same semantics as the user's own DELETE /v1/account).
 func (s *Service) DeleteUser(ctx context.Context, adminID, userID uuid.UUID, reason string) error {
 	return s.db.Tx(ctx, func(tx pgx.Tx) error {
 		q := store.TxQ(tx)
+		u, err := store.GetUserByID(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		before := map[string]string{"status": u.Status}
 		if err := store.PurgeUserSyncData(ctx, q, userID); err != nil {
 			return err
 		}
@@ -207,28 +263,53 @@ func (s *Service) DeleteUser(ctx context.Context, adminID, userID uuid.UUID, rea
 		if err := store.SoftDeleteUser(ctx, q, userID); err != nil {
 			return err
 		}
-		return s.audit.Record(ctx, q, "admin", &adminID, audit.ActionAdminDeleteUser, &userID, reason, "", nil, nil)
+		return s.audit.Record(ctx, q, "admin", &adminID, audit.ActionAdminDeleteUser, &userID, reason, "", before,
+			map[string]string{"status": "deleted"})
 	})
 }
 
 // --- Views -----------------------------------------------------------------------
 
-func (s *Service) ListUsers(ctx context.Context, search string, page int) ([]UserSummary, int, error) {
+func (s *Service) Dashboard(ctx context.Context) (*DashboardStats, error) {
+	d, err := LoadDashboardStats(ctx, s.db.Q())
+	if err != nil {
+		return nil, err
+	}
+	d.RegistrationMode = s.cfg.RegistrationMode
+	return d, nil
+}
+
+// ListUsers returns one page of the filtered/sorted user list + the total
+// (for pagination). Query parameters are preserved by the handler.
+func (s *Service) ListUsers(ctx context.Context, query UserQuery) ([]*UserSummary, int, error) {
 	const perPage = 25
-	if page < 1 {
-		page = 1
+	if query.Page < 1 {
+		query.Page = 1
 	}
 	q := s.db.Q()
-	total, err := CountUsers(ctx, q, search)
+	total, err := CountUsers(ctx, q, query)
 	if err != nil {
 		return nil, 0, err
 	}
-	users, err := ListUsers(ctx, q, search, perPage, (page-1)*perPage)
+	users, err := ListUsers(ctx, q, query, perPage, (query.Page-1)*perPage)
 	return users, total, err
 }
 
+// UserDetail assembles the detail page model (counts + providers + audit
+// timelines). No transcript text is selected.
 func (s *Service) UserDetail(ctx context.Context, id uuid.UUID) (*UserDetail, error) {
-	return GetUserDetail(ctx, s.db.Q(), id)
+	q := s.db.Q()
+	d, err := GetUserDetail(ctx, q, id)
+	if err != nil {
+		return nil, err
+	}
+	if d.SecurityEvents, err = ListAuditEventsForTarget(ctx, q, id, false, 20); err != nil {
+		return nil, err
+	}
+	if d.AdminActions, err = ListAuditEventsForTarget(ctx, q, id, true, 20); err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 func (s *Service) InvitationList(ctx context.Context) ([]Invitation, error) {

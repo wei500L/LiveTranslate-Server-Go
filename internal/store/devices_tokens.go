@@ -21,8 +21,11 @@ type Device struct {
 // GetOrCreateDevice mirrors the Python get_or_create_device: a revoked
 // device re-authenticating is un-revoked in place (its old tokens are
 // already dead); an existing device's display metadata is refreshed.
-func GetOrCreateDevice(ctx context.Context, q Q, userID uuid.UUID, clientDeviceID, displayName, appVersion string) (*Device, error) {
+// `created` reports whether the row was newly inserted (drives the
+// new-device notification mail).
+func GetOrCreateDevice(ctx context.Context, q Q, userID uuid.UUID, clientDeviceID, displayName, appVersion string) (*Device, bool, error) {
 	d := &Device{}
+	created := false
 	err := q.QueryRow(ctx, `
 		INSERT INTO devices (id, user_id, client_device_id, display_name, app_version, last_seen_at)
 		VALUES ($1, $2, $3, $4, $5, now())
@@ -31,13 +34,14 @@ func GetOrCreateDevice(ctx context.Context, q Q, userID uuid.UUID, clientDeviceI
 			    display_name = EXCLUDED.display_name,
 			    app_version  = EXCLUDED.app_version,
 			    last_seen_at = now()
-		RETURNING id, user_id, client_device_id, display_name, app_version, last_seen_at, revoked_at`,
+		RETURNING id, user_id, client_device_id, display_name, app_version, last_seen_at, revoked_at,
+			(xmax = 0) AS inserted`,
 		uuid.New(), userID, clientDeviceID, displayName, appVersion,
-	).Scan(&d.ID, &d.UserID, &d.ClientDeviceID, &d.DisplayName, &d.AppVersion, &d.LastSeenAt, &d.RevokedAt)
+	).Scan(&d.ID, &d.UserID, &d.ClientDeviceID, &d.DisplayName, &d.AppVersion, &d.LastSeenAt, &d.RevokedAt, &created)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return d, nil
+	return d, created, nil
 }
 
 func ListUserDevices(ctx context.Context, q Q, userID uuid.UUID) ([]*Device, error) {

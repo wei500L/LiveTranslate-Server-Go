@@ -119,6 +119,17 @@ LIVETRANSLATE_TEST_DATABASE_URL="postgres://user:pass@host:5432/dbname" go test 
 HTTPS；管理后台走独立内网域名 + IP 白名单；PostgreSQL 端口不对外。迁移
 在 `serve` 启动时自动执行（幂等），也可先 `livetranslate-server migrate`。
 
+环境矩阵与生产启动校验见 `docs/ENVIRONMENTS.md`（`APP_ENV=production`
+时静态校验：默认 JWT 密钥 / DEV 登录 / Mailpit / HTTP 公网地址 / 缺失
+数据库或重置域名 / 占位值均拒绝启动）。备份与恢复见 `deploy/BACKUP.md`
+（`deploy/backup.sh` / `deploy/restore.sh` 均要求显式目标与输出目录）。
+
+密码重置深链：`PUBLIC_BASE_URL` + `/reset-password` 提供 Web 回退页与
+`/.well-known/apple-app-site-association`（Team ID 来自 `AASA_TEAM_ID`，
+未配置时输出空 app 列表，不编造值）。注册策略由 `REGISTRATION_MODE`
+（open | invite_only | disabled）统一驱动，经
+`GET /v1/auth/capabilities` 公开给客户端。
+
 ## 目录
 
 ```
@@ -129,13 +140,19 @@ internal/httpapi/           中间件、错误格式、路由挂载
 internal/httpapi/auth/      /v1/auth/*、/v1/me/*
 internal/httpapi/syncapi/   /v1/sync/*
 internal/httpapi/accountapi /v1/account/*
-internal/auth/              注册/验证/登录/令牌/密码流服务层
-internal/sync/              同步协议服务层 + 墓碑 GC
+internal/auth/              注册/验证/登录/令牌/密码流/资料/邮箱变更/Apple 绑定服务层
+internal/sync/              同步协议服务层 + 墓碑 GC + 维护清理
 internal/password/          Argon2id + 密码策略
-internal/admin/             管理后台（服务/模板/TOTP）
+internal/admin/             管理后台（服务/模板/TOTP/聚合仪表盘）
 internal/audit/             审计记录器
 internal/store/             手写 SQL 数据层
-internal/mail/              SMTP / Mailpit / 日志投递
-internal/token/             JWT 与不透明令牌
+internal/mail/              邮件模板（text+HTML）/ SMTP / Mailpit / 日志投递
+internal/token/             JWT 与不透明令牌（含旧密钥轮换验证）
+internal/webapp/            密码重置 Web 回退页 + AASA
+internal/metrics/           进程内聚合指标（/metrics，无 PII）
+internal/sqlitereader/      纯 Go 只读 SQLite 解析（导入工具专用）
+internal/importer/          Python SQLite → PostgreSQL 一次性导入
+deploy/                     Caddyfile 示例、备份/恢复脚本、BACKUP.md 手册
+docs/                       环境矩阵（ENVIRONMENTS.md）
 tests/integration/          PostgreSQL 全栈集成测试
 ```

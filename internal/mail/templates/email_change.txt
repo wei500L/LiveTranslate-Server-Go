@@ -1,0 +1,12 @@
+LiveTranslate 邮箱变更验证码 / Email change verification
+
+你正在将 LiveTranslate 账号的登录邮箱变更为本邮箱。验证码：
+You are changing the sign-in email of your LiveTranslate account to this address. Verification code:
+
+{{.Code}}
+
+该验证码 {{.VerifyMinutes}} 分钟内有效。在验证完成之前，原邮箱 {{.OldEmail}} 仍然有效。
+This code expires in {{.VerifyMinutes}} minutes. Until verified, the previous email {{.OldEmail}} stays active.
+
+如果你没有请求此操作，请忽略本邮件，你的账号不会有任何变化。
+If you did not request this, ignore this email — nothing will change.

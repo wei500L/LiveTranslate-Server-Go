@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,13 +18,18 @@ const (
 	ActionUserSuspend         = "user.suspend"
 	ActionUserUnsuspend       = "user.unsuspend"
 	ActionUserRevokeAll       = "user.revoke_all_sessions"
+	ActionUserRevokeDevice    = "user.revoke_device"
 	ActionUserDeleteStart     = "user.delete_start"
+	ActionUserDeleteCancel    = "user.delete_cancel"
 	ActionUserDeleted         = "user.deleted"
 	ActionInvitationNew       = "invitation.create"
 	ActionInvitationRevoke    = "invitation.revoke"
 	ActionPasswordChange      = "account.password_change"
 	ActionPasswordReset       = "account.password_reset"
 	ActionEmailVerified       = "account.email_verified"
+	ActionEmailChangeStart    = "account.email_change_start"
+	ActionEmailChanged        = "account.email_changed"
+	ActionProfileUpdate       = "account.profile_update"
 	ActionRegister            = "account.register"
 	ActionLogin               = "account.login"
 	ActionLogoutAll           = "account.logout_all"
@@ -37,6 +43,9 @@ const (
 	ActionAdminReactivateUser = "admin.user_reactivate"
 	ActionAdminForceLogout    = "admin.user_force_logout"
 	ActionAdminDeleteUser     = "admin.user_delete"
+	ActionAdminRevokeDevice   = "admin.user_revoke_device"
+	ActionAdminResendVerify   = "admin.user_resend_verification"
+	ActionAdminSendReset      = "admin.user_send_password_reset"
 )
 
 type Recorder struct{ db *store.DB }
@@ -89,19 +98,22 @@ type AuditEvent struct {
 }
 
 func ListEvents(ctx context.Context, q store.Q, targetUserID *uuid.UUID, limit, offset int) ([]*AuditEvent, error) {
-	var args []any
 	where := "TRUE"
+	var args []any
 	if targetUserID != nil {
 		args = append(args, *targetUserID)
-		where = "target_user_id = $" + string(rune('0'+len(args)))
+		where = fmt.Sprintf("target_user_id = $%d", len(args))
 	}
-	args = append(args, limit, offset)
+	args = append(args, limit)
+	limitArg := fmt.Sprintf("$%d", len(args))
+	args = append(args, offset)
+	offsetArg := fmt.Sprintf("$%d", len(args))
 	rows, err := q.Query(ctx, `
 		SELECT id, actor_type, actor_id, action, target_user_id, reason, ip_hash,
 		       before_state, after_state, created_at
 		FROM audit_events WHERE `+where+`
-		ORDER BY id DESC LIMIT $`+string(rune('0'+len(args)-1))+`
-		OFFSET $`+string(rune('0'+len(args))), args...)
+		ORDER BY id DESC LIMIT `+limitArg+`
+		OFFSET `+offsetArg, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -116,4 +128,10 @@ func ListEvents(ctx context.Context, q store.Q, targetUserID *uuid.UUID, limit, 
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ListEventsForTarget returns the newest events concerning one user (the
+// admin user-detail page's security timeline).
+func ListEventsForTarget(ctx context.Context, q store.Q, targetUserID uuid.UUID, limit int) ([]*AuditEvent, error) {
+	return ListEvents(ctx, q, &targetUserID, limit, 0)
 }

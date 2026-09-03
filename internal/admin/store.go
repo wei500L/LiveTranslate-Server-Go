@@ -1,7 +1,8 @@
 // Package admin is the operations backend: session-cookie auth with CSRF,
 // Argon2id admin accounts, user management (status actions, forced
-// logouts), invitations and the audit log. It renders html/template pages
-// — no JS framework — and NEVER exposes classroom transcript content
+// logouts, device revocation, mail issuing, deletion scheduling),
+// invitations and the audit log. It renders html/template pages — no JS
+// framework — and NEVER exposes classroom transcript content
 // (russian/chinese text): user detail shows counts only. There is no
 // account impersonation.
 package admin
@@ -171,112 +172,6 @@ func RevokeAllAdminSessions(ctx context.Context, q store.Q, adminID uuid.UUID) e
 	return err
 }
 
-// --- Admin-facing user views (no transcript content) ---------------------------
-
-// UserSummary is one row of the user list.
-type UserSummary struct {
-	ID            uuid.UUID
-	Email         *string
-	DisplayName   string
-	Status        string
-	EmailVerified bool
-	CreatedAt     time.Time
-	LastLoginAt   *time.Time
-	DeletedAt     *time.Time
-	SessionCount  int
-	EntryCount    int
-}
-
-// UserDetail adds device/session metadata for the detail page.
-type UserDetail struct {
-	UserSummary
-	Devices []DeviceSummary
-}
-
-type DeviceSummary struct {
-	ID         uuid.UUID
-	DeviceName string
-	AppVersion string
-	LastSeenAt time.Time
-	RevokedAt  *time.Time
-}
-
-// ListUsers returns a page of users with aggregate counts. Search matches
-// email/display name prefix. NO transcript text is ever selected here.
-func ListUsers(ctx context.Context, q store.Q, search string, limit, offset int) ([]UserSummary, error) {
-	rows, err := q.Query(ctx, `
-		SELECT u.id, u.email, u.display_name, u.status,
-			(u.email_verified_at IS NOT NULL) AS email_verified,
-			u.created_at, u.last_login_at, u.deleted_at,
-			(SELECT count(*) FROM refresh_tokens rt
-				JOIN devices d ON d.id = rt.device_id
-				WHERE rt.user_id = u.id AND rt.revoked_at IS NULL AND rt.expires_at > now()) AS session_count,
-			(SELECT count(*) FROM transcript_entries te
-				WHERE te.user_id = u.id AND te.deleted_at IS NULL) AS entry_count
-		FROM users u
-		WHERE ($1 = '' OR u.normalized_email LIKE $1 || '%' OR u.display_name ILIKE '%' || $1 || '%')
-		ORDER BY u.created_at DESC
-		LIMIT $2 OFFSET $3`, search, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []UserSummary
-	for rows.Next() {
-		var u UserSummary
-		if err := rows.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Status, &u.EmailVerified,
-			&u.CreatedAt, &u.LastLoginAt, &u.DeletedAt, &u.SessionCount, &u.EntryCount); err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
-func CountUsers(ctx context.Context, q store.Q, search string) (int, error) {
-	var n int
-	err := q.QueryRow(ctx, `
-		SELECT count(*) FROM users
-		WHERE ($1 = '' OR normalized_email LIKE $1 || '%' OR display_name ILIKE '%' || $1 || '%')`,
-		search).Scan(&n)
-	return n, err
-}
-
-// GetUserDetail loads the user row plus device/session metadata. Counts
-// only — transcript content is deliberately out of scope for admins.
-func GetUserDetail(ctx context.Context, q store.Q, id uuid.UUID) (*UserDetail, error) {
-	row := q.QueryRow(ctx, `
-		SELECT u.id, u.email, u.display_name, u.status,
-			(u.email_verified_at IS NOT NULL) AS email_verified,
-			u.created_at, u.last_login_at, u.deleted_at,
-			(SELECT count(*) FROM transcript_entries te
-				WHERE te.user_id = u.id AND te.deleted_at IS NULL)
-		FROM users u WHERE u.id = $1`, id)
-	d := &UserDetail{}
-	if err := row.Scan(&d.ID, &d.Email, &d.DisplayName, &d.Status, &d.EmailVerified,
-		&d.CreatedAt, &d.LastLoginAt, &d.DeletedAt, &d.EntryCount); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, store.ErrNotFound
-		}
-		return nil, err
-	}
-	devs, err := q.Query(ctx, `
-		SELECT d.id, d.display_name, d.app_version, d.last_seen_at, d.revoked_at
-		FROM devices d WHERE d.user_id = $1 ORDER BY d.last_seen_at DESC`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer devs.Close()
-	for devs.Next() {
-		var ds DeviceSummary
-		if err := devs.Scan(&ds.ID, &ds.DeviceName, &ds.AppVersion, &ds.LastSeenAt, &ds.RevokedAt); err != nil {
-			return nil, err
-		}
-		d.Devices = append(d.Devices, ds)
-	}
-	return d, devs.Err()
-}
-
 // --- Invitations ----------------------------------------------------------------
 
 type Invitation struct {
@@ -343,6 +238,35 @@ func ListAuditEvents(ctx context.Context, q store.Q, limit int) ([]AuditEventRow
 	rows, err := q.Query(ctx, `
 		SELECT id, actor_type, actor_id, action, target_user_id, reason, ip_hash, created_at
 		FROM audit_events ORDER BY id DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEventRow
+	for rows.Next() {
+		var e AuditEventRow
+		if err := rows.Scan(&e.ID, &e.ActorType, &e.ActorID, &e.Action, &e.TargetUserID,
+			&e.Reason, &e.IPHash, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ListAuditEventsForTarget returns the newest events where the user is the
+// target — the security timeline on the user-detail page. `actorAdmin`
+// selects the admin-operations slice instead of the security slice.
+func ListAuditEventsForTarget(ctx context.Context, q store.Q, userID uuid.UUID, actorAdmin bool, limit int) ([]AuditEventRow, error) {
+	actor := "user"
+	if actorAdmin {
+		actor = "admin"
+	}
+	rows, err := q.Query(ctx, `
+		SELECT id, actor_type, actor_id, action, target_user_id, reason, ip_hash, created_at
+		FROM audit_events
+		WHERE target_user_id = $1 AND actor_type = $2
+		ORDER BY id DESC LIMIT $3`, userID, actor, limit)
 	if err != nil {
 		return nil, err
 	}

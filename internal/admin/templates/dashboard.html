@@ -1,18 +1,70 @@
 {{template "head" .}}
 <div class="card">
   <h1>概览</h1>
-  <p class="muted">最近 200 条审计事件。管理员无法查看任何课堂文本内容（俄语原文与中文译文）。</p>
+  <p class="muted">聚合统计 + 最近审计事件。管理员无法查看任何课堂文本内容（俄语原文与中文译文）。邮件/API 错误计数来自本进程启动以来。</p>
 </div>
+
+<div class="card">
+  <h2>用户</h2>
+  <table>
+    <tr><th>用户总数</th><th>活跃</th><th>未验证</th><th>暂停</th><th>今日注册</th><th>注册模式</th></tr>
+    <tr>
+      <td><strong>{{.Data.Stats.UsersTotal}}</strong></td>
+      <td>{{.Data.Stats.UsersActive}}</td>
+      <td>{{.Data.Stats.UsersPending}}</td>
+      <td>{{.Data.Stats.UsersSuspended}}</td>
+      <td>{{.Data.Stats.RegisteredToday}}</td>
+      <td><code>{{.Data.Stats.RegistrationMode}}</code></td>
+    </tr>
+  </table>
+  {{if .Data.Stats.RegistrationTrend}}
+  <h2>最近 7 天注册趋势</h2>
+  <div class="trend">
+    {{ $max := 0 }}
+    {{range .Data.Stats.RegistrationTrend}}{{if gt .Count $max}}{{$max = .Count}}{{end}}{{end}}
+    {{range .Data.Stats.RegistrationTrend}}
+    <div class="trend-col">
+      <div class="trend-bar" style="height:{{trendHeight .Count $max}}px" title="{{.Count}}"></div>
+      <div class="trend-label">{{fmtDay .Day}}</div>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+
+<div class="card">
+  <h2>数据与运行</h2>
+  <table>
+    <tr><th>设备会话（活跃）</th><th>设备总数</th><th>课堂数量</th><th>转写条目</th><th>最近同步</th></tr>
+    <tr>
+      <td>{{.Data.Stats.LiveSessions}}</td>
+      <td>{{.Data.Stats.DeviceRows}}</td>
+      <td>{{.Data.Stats.ClassroomSessions}}</td>
+      <td>{{.Data.Stats.TranscriptEntries}}</td>
+      <td class="muted">{{fmtTimePtr .Data.Stats.RecentSyncAt}}</td>
+    </tr>
+  </table>
+  <table>
+    <tr><th>HTTP 请求（进程内）</th><th>API 5xx 错误</th><th>邮件已发送</th><th>邮件发送失败</th></tr>
+    <tr>
+      <td>{{index .Data.Counters "http_requests_total"}}</td>
+      <td>{{index .Data.Counters "http_5xx_total"}}</td>
+      <td>{{index .Data.Counters "mail_sent_total"}}</td>
+      <td>{{if gt (index .Data.Counters "mail_failed_total") 0}}<span class="pill suspended">{{index .Data.Counters "mail_failed_total"}}</span>{{else}}{{index .Data.Counters "mail_failed_total"}}{{end}}</td>
+    </tr>
+  </table>
+</div>
+
 <div class="card">
   <h2>审计事件</h2>
   <table>
     <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标用户</th><th>说明</th></tr>
-    {{range .Data}}
+    {{range .Data.Events}}
     <tr>
       <td class="muted">{{fmtTime .CreatedAt}}</td>
       <td>{{.ActorType}}</td>
       <td><code>{{.Action}}</code></td>
-      <td class="muted">{{if .TargetUserID}}{{.TargetUserID}}{{else}}—{{end}}</td>
+      <td class="muted">{{if .TargetUserID}}<a href="/users/{{.TargetUserID}}">{{.TargetUserID}}</a>{{else}}—{{end}}</td>
       <td>{{.Reason}}</td>
     </tr>
     {{else}}

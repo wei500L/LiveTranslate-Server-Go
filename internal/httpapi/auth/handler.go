@@ -70,6 +70,7 @@ func (h *Handler) ClientIP(r *http.Request) string {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/auth/capabilities", h.capabilities)
 	mux.HandleFunc("POST /v1/auth/register", h.register)
 	mux.HandleFunc("POST /v1/auth/email/verify", h.verifyEmail)
 	mux.HandleFunc("POST /v1/auth/email/resend", h.resend)
@@ -82,11 +83,17 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/auth/apple", h.apple)
 	mux.HandleFunc("POST /v1/auth/dev", h.devLogin)
 	// Me / password-change / devices live under /v1/me per the spec.
-	mux.HandleFunc("GET /v1/me", h.me)
+	mux.HandleFunc("GET /v1/me", h.meProfile)
+	mux.HandleFunc("PATCH /v1/me", h.patchMe)
 	mux.HandleFunc("GET /v1/me/password/change", h.getMethodNotAllowed)
 	mux.HandleFunc("POST /v1/me/password/change", h.changePassword)
 	mux.HandleFunc("GET /v1/me/devices", h.listDevices)
 	mux.HandleFunc("DELETE /v1/me/devices/{deviceID}", h.revokeDevice)
+	// Login-email change (two-step) and Apple bind/unbind.
+	mux.HandleFunc("POST /v1/me/email/change", h.requestEmailChange)
+	mux.HandleFunc("POST /v1/me/email/verify", h.verifyEmailChange)
+	mux.HandleFunc("POST /v1/me/apple/bind", h.bindApple)
+	mux.HandleFunc("DELETE /v1/me/apple", h.unbindApple)
 }
 
 func (h *Handler) getMethodNotAllowed(w http.ResponseWriter, r *http.Request) {

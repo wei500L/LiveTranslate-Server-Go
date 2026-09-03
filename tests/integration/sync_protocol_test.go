@@ -578,3 +578,169 @@ func forgedToken(e *env) string {
 	}
 	return tok
 }
+
+// §Correction sync: transcript corrections ride as their own entity
+// (id == entry id) with newer-modifiedAt-wins merge and delete-wins
+// revert semantics. The entry's model text stays immutable.
+func TestSyncTranscriptCorrectionLifecycle(t *testing.T) {
+	e := newEnv(t, nil)
+	u := e.registerAndVerify("correction@example.com", "correct-horse-battery-9")
+
+	sessID, entryID := uuid.New().String(), uuid.New().String()
+	_, _, out := e.push(t, u.AccessToken,
+		sessionOp(uuid.New().String(), sessID, 0, "有修正的课堂"),
+		entryOp(uuid.New().String(), sessID, entryID, 1, "Привет"),
+	)
+	if resultField(t, results(t, out)[1], "status") != "accepted" {
+		t.Fatalf("entry push failed: %v", out)
+	}
+
+	// Correction upsert (id == entry id).
+	corrOp := func(base int, russian string, chinese any, modified string) map[string]any {
+		return map[string]any{
+			"operationId":     uuid.New().String(),
+			"entityType":      "transcript_correction",
+			"entityId":        entryID,
+			"operation":       "upsert",
+			"baseVersion":     base,
+			"clientUpdatedAt": modified,
+			"payload": map[string]any{
+				"correctionRussian":    russian,
+				"correctionChinese":    chinese,
+				"correctionModifiedAt": modified,
+			},
+		}
+	}
+	_, _, out = e.push(t, u.AccessToken,
+		corrOp(0, "Привет, мир!", nil, "2026-09-01T11:00:00Z"))
+	r := results(t, out)[0]
+	if resultField(t, r, "status") != "accepted" {
+		t.Fatalf("correction push failed: %v", r)
+	}
+	v1 := int(resultField(t, r, "serverVersion").(float64))
+	if v1 != 1 {
+		t.Fatalf("correction serverVersion = %d, want 1", v1)
+	}
+
+	// Older modifiedAt on the same base: the NEWER text wins, version bumps.
+	_, _, out = e.push(t, u.AccessToken,
+		corrOp(1, "старая правка", "旧修改", "2026-09-01T10:00:00Z"))
+	r = results(t, out)[0]
+	if resultField(t, r, "status") != "accepted" {
+		t.Fatalf("older correction push failed: %v", r)
+	}
+	var russian string
+	_ = testDB.Pool.QueryRow(t.Context(),
+		`SELECT russian_text FROM transcript_corrections WHERE id = $1`, entryID).Scan(&russian)
+	if russian != "Привет, мир!" {
+		t.Fatalf("older correction overwrote newer text: %q", russian)
+	}
+
+	// The entry's model text is untouched by correction writes.
+	var modelRussian string
+	_ = testDB.Pool.QueryRow(t.Context(),
+		`SELECT russian_text FROM transcript_entries WHERE id = $1`, entryID).Scan(&modelRussian)
+	if modelRussian != "Привет" {
+		t.Fatalf("model text changed: %q", modelRussian)
+	}
+
+	// Correction without a live parent entry → rejected.
+	orphan := corrOp(0, "x", nil, "2026-09-01T12:00:00Z")
+	orphan["entityId"] = uuid.New().String()
+	_, _, out = e.push(t, u.AccessToken, orphan)
+	if resultField(t, results(t, out)[0], "status") != "rejected" {
+		t.Fatalf("orphan correction accepted: %v", out)
+	}
+
+	// Delete (revert to model original) then resurrection attempt → delete-wins.
+	_, _, out = e.push(t, u.AccessToken, deleteOp(uuid.New().String(), "transcript_correction", entryID, 0))
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("correction delete failed: %v", out)
+	}
+	_, _, out = e.push(t, u.AccessToken,
+		corrOp(99, "воскрес", nil, "2026-09-01T13:00:00Z"))
+	r = results(t, out)[0]
+	if resultField(t, r, "status") != "conflict" {
+		t.Fatalf("correction resurrection = %v", r)
+	}
+	if rec, ok := resultField(t, r, "serverRecord").(map[string]any); ok {
+		if rec["deleted"] != true {
+			t.Fatalf("tombstone record not deleted: %v", rec)
+		}
+	}
+
+	// Pull round-trips the correction record shape (correctionXxx keys).
+	changes, _, _ := e.pull(t, u.AccessToken, 0, 0)
+	sawCorrection := false
+	for _, c := range changes {
+		m := c.(map[string]any)
+		if m["entityType"] != "transcript_correction" || m["operation"] != "upsert" {
+			continue
+		}
+		sawCorrection = true
+		rec := m["record"].(map[string]any)
+		if rec["correctionRussian"] != "Привет, мир!" {
+			t.Fatalf("correction record russian wrong: %v", rec)
+		}
+		if _, present := rec["correctionChinese"]; present {
+			t.Fatalf("nil chinese must be omitted: %v", rec)
+		}
+	}
+	if !sawCorrection {
+		t.Fatalf("no transcript_correction record in pull")
+	}
+
+	// Status counts the corrections.
+	resp, raw := e.get("/v1/sync/status", u.AccessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: %d %s", resp.StatusCode, raw)
+	}
+	var st struct {
+		TranscriptCorrectionCount int `json:"transcriptCorrectionCount"`
+	}
+	decode(t, raw, &st)
+	// The correction is tombstoned → live count 0.
+	if st.TranscriptCorrectionCount != 0 {
+		t.Fatalf("correction count = %d, want 0 (tombstoned)", st.TranscriptCorrectionCount)
+	}
+}
+
+// §Entry time source: an explicit "audio" marker round-trips; absent keeps
+// the stored (legacy) default.
+func TestSyncEntryTimeSource(t *testing.T) {
+	e := newEnv(t, nil)
+	u := e.registerAndVerify("timesource@example.com", "correct-horse-battery-9")
+
+	sessID, entryID := uuid.New().String(), uuid.New().String()
+	audio := entryOp(uuid.New().String(), sessID, entryID, 1, "Точно")
+	audio["payload"].(map[string]any)["timeSource"] = "audio"
+	_, _, out := e.push(t, u.AccessToken, sessionOp(uuid.New().String(), sessID, 0, "x"), audio)
+	if resultField(t, results(t, out)[1], "status") != "accepted" {
+		t.Fatalf("audio entry push failed: %v", out)
+	}
+
+	legacyID := uuid.New().String()
+	_, _, out = e.push(t, u.AccessToken, entryOp(uuid.New().String(), sessID, legacyID, 2, "Старая"))
+	if resultField(t, results(t, out)[0], "status") != "accepted" {
+		t.Fatalf("legacy entry push failed: %v", out)
+	}
+
+	changes, _, _ := e.pull(t, u.AccessToken, 0, 0)
+	for _, c := range changes {
+		m := c.(map[string]any)
+		if m["entityType"] != "entry" {
+			continue
+		}
+		rec := m["record"].(map[string]any)
+		switch rec["id"] {
+		case entryID:
+			if rec["timeSource"] != "audio" {
+				t.Fatalf("audio marker lost: %v", rec)
+			}
+		case legacyID:
+			if rec["timeSource"] != "legacy" {
+				t.Fatalf("legacy default wrong: %v", rec)
+			}
+		}
+	}
+}

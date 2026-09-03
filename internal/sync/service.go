@@ -146,6 +146,7 @@ type entryRow struct {
 	russian     string
 	chinese     *string
 	status      string
+	timeSource  string
 	serverVer   int
 	updatedAt   time.Time
 	deletedAt   *time.Time
@@ -155,11 +156,12 @@ func fetchEntry(ctx context.Context, q store.Q, userID, id uuid.UUID) (*entryRow
 	e := &entryRow{}
 	err := q.QueryRow(ctx, `
 		SELECT id, session_id, sequence_id, start_offset, end_offset,
-		       russian_text, chinese_text, translation_status, server_version,
-		       updated_at, deleted_at
+		       russian_text, chinese_text, translation_status, time_source,
+		       server_version, updated_at, deleted_at
 		FROM transcript_entries WHERE id = $1 AND user_id = $2`, id, userID,
 	).Scan(&e.id, &e.sessionID, &e.sequenceID, &e.startOffset, &e.endOffset,
-		&e.russian, &e.chinese, &e.status, &e.serverVer, &e.updatedAt, &e.deletedAt)
+		&e.russian, &e.chinese, &e.status, &e.timeSource,
+		&e.serverVer, &e.updatedAt, &e.deletedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -174,7 +176,54 @@ func entryRecordJSON(e *entryRow) json.RawMessage {
 		EntityType: EntityEntry, ID: e.id.String(), SessionID: e.sessionID.String(),
 		SequenceID: e.sequenceID, StartOffset: e.startOffset, EndOffset: e.endOffset,
 		RussianText: e.russian, ChineseText: e.chinese, TranslationStatus: e.status,
+		TimeSource:    e.timeSource,
 		ServerVersion: e.serverVer, Deleted: e.deletedAt != nil,
+	})
+	return b
+}
+
+// --- Transcript corrections -----------------------------------------------------
+
+type correctionRow struct {
+	id           uuid.UUID // == transcript_entries.id
+	userID       uuid.UUID
+	sessionID    uuid.UUID
+	russian      string
+	chinese      *string
+	modifiedAt   time.Time
+	needsRetrans bool
+	serverVer    int
+	createdAt    time.Time
+	updatedAt    time.Time
+	deletedAt    *time.Time
+}
+
+func fetchCorrection(ctx context.Context, q store.Q, userID, id uuid.UUID) (*correctionRow, error) {
+	c := &correctionRow{}
+	err := q.QueryRow(ctx, `
+		SELECT id, user_id, session_id, russian_text, chinese_text,
+		       modified_at, needs_retranslation,
+		       server_version, created_at, updated_at, deleted_at
+		FROM transcript_corrections WHERE id = $1 AND user_id = $2`, id, userID,
+	).Scan(&c.id, &c.userID, &c.sessionID, &c.russian, &c.chinese,
+		&c.modifiedAt, &c.needsRetrans,
+		&c.serverVer, &c.createdAt, &c.updatedAt, &c.deletedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func correctionRecordJSON(c *correctionRow) json.RawMessage {
+	b, _ := json.Marshal(transcriptCorrectionRecord{
+		EntityType: EntityTranscriptCorrection, ID: c.id.String(),
+		SessionID:   c.sessionID.String(),
+		RussianText: c.russian, ChineseText: c.chinese,
+		ModifiedAt: c.modifiedAt, NeedsRetrans: c.needsRetrans,
+		ServerVersion: c.serverVer, Deleted: c.deletedAt != nil,
 	})
 	return b
 }
@@ -291,6 +340,7 @@ type noteRow struct {
 	sessionID   uuid.UUID
 	anchorEntry *uuid.UUID
 	noteText    string
+	timeOffset  *float64
 	serverVer   int
 	createdAt   time.Time
 	updatedAt   time.Time
@@ -300,10 +350,10 @@ type noteRow struct {
 func fetchNote(ctx context.Context, q store.Q, userID, id uuid.UUID) (*noteRow, error) {
 	n := &noteRow{}
 	err := q.QueryRow(ctx, `
-		SELECT id, user_id, session_id, anchor_entry_id, note_text,
+		SELECT id, user_id, session_id, anchor_entry_id, note_text, time_offset,
 		       server_version, created_at, updated_at, deleted_at
 		FROM session_notes WHERE id = $1 AND user_id = $2`, id, userID,
-	).Scan(&n.id, &n.userID, &n.sessionID, &n.anchorEntry, &n.noteText,
+	).Scan(&n.id, &n.userID, &n.sessionID, &n.anchorEntry, &n.noteText, &n.timeOffset,
 		&n.serverVer, &n.createdAt, &n.updatedAt, &n.deletedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -322,7 +372,7 @@ func noteRecordJSON(n *noteRow) json.RawMessage {
 	}
 	b, _ := json.Marshal(noteRecord{
 		EntityType: EntityNote, ID: n.id.String(), SessionID: n.sessionID.String(),
-		AnchorEntryID: anchor, NoteText: n.noteText,
+		AnchorEntryID: anchor, NoteText: n.noteText, TimeOffset: n.timeOffset,
 		ServerVersion: n.serverVer, Deleted: n.deletedAt != nil,
 	})
 	return b
@@ -828,6 +878,8 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyStudyCard(ctx, q, userID, item)
 	case EntityStudyTask:
 		return s.applyStudyTask(ctx, q, userID, item)
+	case EntityTranscriptCorrection:
+		return s.applyCorrection(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -1185,6 +1237,35 @@ func (s *Service) cascadeDeleteChildren(ctx context.Context, q store.Q, userID, 
 			return err
 		}
 	}
+
+	// Corrections follow their entries into the tombstone (a deleted
+	// entry has no text left to overlay).
+	rows, err = q.Query(ctx, `
+		UPDATE transcript_corrections
+		SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	var corrections []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		corrections = append(corrections, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range corrections {
+		if err := logChange(ctx, q, userID, EntityTranscriptCorrection, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1288,16 +1369,20 @@ func (s *Service) applyEntry(ctx context.Context, q store.Q, userID uuid.UUID, i
 		if p.TranslationStatus != nil {
 			status = *p.TranslationStatus
 		}
+		timeSource := "legacy"
+		if p.TimeSource != nil && *p.TimeSource == "audio" {
+			timeSource = "audio"
+		}
 		var updatedAt time.Time
 		err := q.QueryRow(ctx, `
 			INSERT INTO transcript_entries
 				(id, user_id, session_id, sequence_id, start_offset, end_offset,
-				 russian_text, chinese_text, translation_status, server_version,
-				 created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now(), now())
+				 russian_text, chinese_text, translation_status, time_source,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, now(), now())
 			RETURNING updated_at`,
 			item.EntityID, userID, *p.SessionID, *p.SequenceID, start, end,
-			*p.RussianText, p.ChineseText, status,
+			*p.RussianText, p.ChineseText, status, timeSource,
 		).Scan(&updatedAt)
 		if err != nil {
 			return nil, err
@@ -1360,16 +1445,22 @@ func (s *Service) applyEntry(ctx context.Context, q store.Q, userID uuid.UUID, i
 	if p.EndOffset != nil && obj.endOffset == 0 {
 		end = *p.EndOffset
 	}
+	// Time provenance: an explicit "audio" marks sample-timeline offsets;
+	// anything else keeps the stored marker (legacy is the default).
+	timeSource := obj.timeSource
+	if p.TimeSource != nil && *p.TimeSource == "audio" {
+		timeSource = "audio"
+	}
 	var version int
 	var updatedAt time.Time
 	err = q.QueryRow(ctx, `
 		UPDATE transcript_entries
 		SET start_offset = $3, end_offset = $4, chinese_text = $5,
-		    translation_status = $6,
+		    translation_status = $6, time_source = $7,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
-		item.EntityID, userID, start, end, chinese, status,
+		item.EntityID, userID, start, end, chinese, status, timeSource,
 	).Scan(&version, &updatedAt)
 	if err != nil {
 		return nil, err
@@ -1382,6 +1473,208 @@ func (s *Service) applyEntry(ctx context.Context, q store.Q, userID uuid.UUID, i
 		return nil, err
 	}
 	return res, nil
+}
+
+// --- Transcript correction --------------------------------------------------------
+
+// applyCorrection: the user's correction overlay for one entry (entity id
+// == entry id). Semantics:
+//
+//   - delete = revert to the model's original. The tombstone bumps the
+//     version, so a stale upsert from an old device hits the delete-wins
+//     conflict path — a reverted correction cannot resurrect. Phantom
+//     tombstones (never seen server-side) follow the shared pattern.
+//   - upsert requires a live parent entry owned by the user (corrections
+//     without an entry are rejected — nothing to correct).
+//   - merge rule on base==ver: the side with the NEWER correctionModifiedAt
+//     wins the TEXT fields. A differing older push still bumps the version
+//     but keeps the stored texts (the newer edit survives); the losing
+//     side's device sees the conflict result and keeps its copy locally.
+//   - chinese_text preserves nil-vs-empty: nil = never corrected, ” =
+//     a deliberate blank. The payload pointer carries both faithfully.
+func (s *Service) applyCorrection(ctx context.Context, q store.Q, userID uuid.UUID, item *PushItem) (*PushItemResult, error) {
+	obj, err := fetchCorrection(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	p := item.Payload
+
+	if item.Operation == "delete" {
+		if obj == nil {
+			// Phantom tombstone: the entry may exist even though the
+			// correction never did — record the delete so offline devices
+			// learn the correction is gone (or was never there).
+			sid := uuid.Nil
+			if p.SessionID != nil {
+				sid = *p.SessionID
+			}
+			var updatedAt time.Time
+			err := q.QueryRow(ctx, `
+				INSERT INTO transcript_corrections
+					(id, user_id, session_id, russian_text, modified_at,
+					 server_version, created_at, updated_at, deleted_at)
+				VALUES ($1, $2, $3, '', $4, 1, now(), now(), now())
+				RETURNING updated_at`, item.EntityID, userID, sid, item.ClientUpdatedAt,
+			).Scan(&updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err := logChange(ctx, q, userID, EntityTranscriptCorrection, item.EntityID, "delete", 1); err != nil {
+				return nil, err
+			}
+			res := accepted(item, 1, updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		if obj.deletedAt != nil {
+			res := accepted(item, obj.serverVer, obj.updatedAt)
+			if err := storeLedger(ctx, q, userID, item, res); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
+		var version int
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			UPDATE transcript_corrections
+			SET deleted_at = now(), server_version = server_version + 1, updated_at = now()
+			WHERE id = $1 AND user_id = $2
+			RETURNING server_version, updated_at`, item.EntityID, userID,
+		).Scan(&version, &updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityTranscriptCorrection, item.EntityID, "delete", version); err != nil {
+			return nil, err
+		}
+		res := accepted(item, version, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// upsert: the parent entry must exist and be live.
+	parent, err := fetchEntry(ctx, q, userID, item.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	if parent == nil || parent.deletedAt != nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	modifiedAt := time.Now()
+	if p.CorrectionModifiedAt != nil {
+		modifiedAt = *p.CorrectionModifiedAt
+	}
+	needsRetrans := false
+	if p.CorrectionNeedsRetranslation != nil {
+		needsRetrans = *p.CorrectionNeedsRetranslation
+	}
+
+	if obj == nil {
+		var updatedAt time.Time
+		err := q.QueryRow(ctx, `
+			INSERT INTO transcript_corrections
+				(id, user_id, session_id, russian_text, chinese_text,
+				 modified_at, needs_retranslation,
+				 server_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, now(), now())
+			RETURNING updated_at`,
+			item.EntityID, userID, parent.sessionID,
+			derefString(p.CorrectionRussian), p.CorrectionChinese,
+			modifiedAt, needsRetrans,
+		).Scan(&updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := logChange(ctx, q, userID, EntityTranscriptCorrection, item.EntityID, "upsert", 1); err != nil {
+			return nil, err
+		}
+		res := accepted(item, 1, updatedAt)
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	if obj.deletedAt != nil {
+		// Delete-wins: a reverted correction stays reverted.
+		res := conflict(item, obj.serverVer, obj.updatedAt, correctionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion < obj.serverVer {
+		res := conflict(item, obj.serverVer, obj.updatedAt, correctionRecordJSON(obj))
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	if item.BaseVersion > obj.serverVer {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+
+	// Merge: the NEWER correctionModifiedAt wins the text fields. An older
+	// push still bumps the version (so the newer state propagates) but
+	// keeps the stored texts.
+	russian := obj.russian
+	chinese := obj.chinese
+	if !modifiedAt.Before(obj.modifiedAt) {
+		russian = derefString(p.CorrectionRussian)
+		chinese = p.CorrectionChinese
+	}
+	var version int
+	var updatedAt time.Time
+	err = q.QueryRow(ctx, `
+		UPDATE transcript_corrections
+		SET russian_text = $3, chinese_text = $4, modified_at = $5,
+		    needs_retranslation = $6,
+		    server_version = server_version + 1, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING server_version, updated_at`,
+		item.EntityID, userID, russian, chinese,
+		maxTime(obj.modifiedAt, modifiedAt), needsRetrans,
+	).Scan(&version, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := logChange(ctx, q, userID, EntityTranscriptCorrection, item.EntityID, "upsert", version); err != nil {
+		return nil, err
+	}
+	res := accepted(item, version, updatedAt)
+	if err := storeLedger(ctx, q, userID, item, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// derefString: nil-safe string pointer dereference (nil → "").
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// maxTime returns the later of two timestamps.
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // --- Bookmark / Favorite ---------------------------------------------------------
@@ -2020,11 +2313,11 @@ func (s *Service) applyNote(ctx context.Context, q store.Q, userID uuid.UUID, it
 		var updatedAt time.Time
 		err := q.QueryRow(ctx, `
 			INSERT INTO session_notes
-				(id, user_id, session_id, anchor_entry_id, note_text,
+				(id, user_id, session_id, anchor_entry_id, note_text, time_offset,
 				 server_version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 1, now(), now())
+			VALUES ($1, $2, $3, $4, $5, $6, 1, now(), now())
 			RETURNING updated_at`,
-			item.EntityID, userID, *p.SessionID, anchor, *p.NoteText,
+			item.EntityID, userID, *p.SessionID, anchor, *p.NoteText, p.NoteTimeOffset,
 		).Scan(&updatedAt)
 		if err != nil {
 			return nil, err
@@ -2076,15 +2369,22 @@ func (s *Service) applyNote(ctx context.Context, q store.Q, userID uuid.UUID, it
 			anchor = p.AnchorEntry
 		}
 	}
+	// The note's classroom-relative position: absent payload keeps the
+	// stored offset (never clearable — an approximation stays better than
+	// nothing), present overwrites.
+	timeOffset := obj.timeOffset
+	if p.NoteTimeOffset != nil {
+		timeOffset = p.NoteTimeOffset
+	}
 	var version int
 	var updatedAt time.Time
 	err = q.QueryRow(ctx, `
 		UPDATE session_notes
-		SET anchor_entry_id = $3, note_text = $4,
+		SET anchor_entry_id = $3, note_text = $4, time_offset = $5,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
-		item.EntityID, userID, anchor, text,
+		item.EntityID, userID, anchor, text, timeOffset,
 	).Scan(&version, &updatedAt)
 	if err != nil {
 		return nil, err
@@ -3386,6 +3686,12 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return studyTaskRecordJSON(obj), nil
+	case EntityTranscriptCorrection:
+		obj, err := fetchCorrection(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return correctionRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -3394,7 +3700,7 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
-	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks int
+	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -3406,26 +3712,28 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM session_attachments WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM glossary_terms WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_cards WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM study_tasks WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks)
+			(SELECT count(*) FROM study_tasks WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM transcript_corrections WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections)
 	if err != nil {
 		return nil, err
 	}
 	return &SyncStatusResponse{
-		SchemaVersion:          s.cfg.SchemaVersion,
-		MinClientSchemaVersion: s.cfg.MinClientSchemaVersion,
-		MaxClientSchemaVersion: s.cfg.MaxClientSchemaVersion,
-		ChangeLogTail:          int64(tail),
-		SessionCount:           sessions,
-		EntryCount:             entries,
-		CourseCount:            courses,
-		NoteCount:              notes,
-		ReviewCount:            reviews,
-		AttachmentCount:        attachments,
-		TermCount:              terms,
-		StudyCardCount:         cards,
-		StudyTaskCount:         tasks,
-		PendingCount:           0,
-		ServerTime:             time.Now(),
+		SchemaVersion:             s.cfg.SchemaVersion,
+		MinClientSchemaVersion:    s.cfg.MinClientSchemaVersion,
+		MaxClientSchemaVersion:    s.cfg.MaxClientSchemaVersion,
+		ChangeLogTail:             int64(tail),
+		SessionCount:              sessions,
+		EntryCount:                entries,
+		CourseCount:               courses,
+		NoteCount:                 notes,
+		ReviewCount:               reviews,
+		AttachmentCount:           attachments,
+		TermCount:                 terms,
+		StudyCardCount:            cards,
+		StudyTaskCount:            tasks,
+		TranscriptCorrectionCount: corrections,
+		PendingCount:              0,
+		ServerTime:                time.Now(),
 	}, nil
 }

@@ -31,11 +31,13 @@ type DashboardStats struct {
 	GlossaryTerms     int
 	StudyCards        int
 	StudyTasks        int
-	RecentSyncAt      *time.Time
-	MailSent          int64 // from the in-process metrics counters
-	MailFailed        int64
-	APIErrors         int64
-	HTTPRequests      int64
+	// User corrections overlaying the model output (manual edit layer).
+	TranscriptCorrections int
+	RecentSyncAt          *time.Time
+	MailSent              int64 // from the in-process metrics counters
+	MailFailed            int64
+	APIErrors             int64
+	HTTPRequests          int64
 	// RegistrationTrend is per-day counts for the last 7 days, oldest first.
 	RegistrationTrend []TrendPoint
 	RegistrationMode  string
@@ -64,11 +66,13 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 			(SELECT count(*) FROM glossary_terms WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM study_cards WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM study_tasks WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM transcript_corrections WHERE deleted_at IS NULL),
 			(SELECT max(created_at) FROM sync_changes)
 	`).Scan(&d.UsersTotal, &d.UsersActive, &d.UsersPending, &d.UsersSuspended,
 		&d.UsersUnverified, &d.RegisteredToday, &d.DeviceRows, &d.LiveSessions,
 		&d.ClassroomSessions, &d.TranscriptEntries, &d.StudyReviews,
-		&d.GlossaryTerms, &d.StudyCards, &d.StudyTasks, &d.RecentSyncAt)
+		&d.GlossaryTerms, &d.StudyCards, &d.StudyTasks,
+		&d.TranscriptCorrections, &d.RecentSyncAt)
 	if err != nil {
 		return nil, err
 	}

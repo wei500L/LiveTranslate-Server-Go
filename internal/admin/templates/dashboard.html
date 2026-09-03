@@ -36,7 +36,7 @@
   <h2>数据与运行</h2>
   <p class="muted">下表一为数据库聚合统计（长期业务数据）；下表二为进程内运行计数（<strong>当前实例，自启动以来</strong>，重启清零，非长期业务统计）。</p>
   <table>
-    <tr><th>设备会话（活跃）</th><th>设备总数</th><th>课堂数量</th><th>转写条目</th><th>学习整理</th><th>术语</th><th>学习卡片</th><th>学习任务</th><th>最近同步</th></tr>
+    <tr><th>设备会话（活跃）</th><th>设备总数</th><th>课堂数量</th><th>转写条目</th><th>学习整理</th><th>术语</th><th>学习卡片</th><th>学习任务</th><th>人工修正</th><th>最近同步</th></tr>
     <tr>
       <td>{{.Data.Stats.LiveSessions}}</td>
       <td>{{.Data.Stats.DeviceRows}}</td>
@@ -46,6 +46,7 @@
       <td>{{.Data.Stats.GlossaryTerms}}</td>
       <td>{{.Data.Stats.StudyCards}}</td>
       <td>{{.Data.Stats.StudyTasks}}</td>
+      <td>{{.Data.Stats.TranscriptCorrections}}</td>
       <td class="muted">{{fmtTimePtr .Data.Stats.RecentSyncAt}}</td>
     </tr>
   </table>

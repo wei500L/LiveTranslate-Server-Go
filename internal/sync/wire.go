@@ -91,6 +91,10 @@ type PushPayload struct {
 	IsArchived  *bool      `json:"isArchived"`
 	NoteText    *string    `json:"noteText"`
 	AnchorEntry *uuid.UUID `json:"anchorEntryId"`
+	// Note's classroom-relative position (live time or playback position
+	// when it was taken). Absent keeps the stored value; NULL never rides
+	// the wire (absence = keep; the client cannot clear an offset).
+	NoteTimeOffset *float64 `json:"noteTimeOffset"`
 	// study review (entity id == session id; status of the review itself).
 	ReviewStatus      *string    `json:"reviewStatus"`
 	ReviewContent     *string    `json:"reviewContent"`
@@ -113,6 +117,18 @@ type PushPayload struct {
 	AttachmentCapturedAt *time.Time `json:"attachmentCapturedAt"`
 	AttachmentCaption    *string    `json:"attachmentCaption"`
 	AttachmentSortIndex  *int       `json:"attachmentSortIndex"`
+	// Transcript entry time provenance: "audio" (recorded sample
+	// timeline) or "legacy" (older app version, unmarked). Absent keeps
+	// the stored value.
+	TimeSource *string `json:"timeSource"`
+	// Transcript correction (entity id == entry id; corrected texts ride
+	// their own fields — the entry's model output stays immutable).
+	// CorrectionChinese follows nil-vs-empty semantics: nil = the user
+	// never corrected the Chinese; "" = a deliberate blank.
+	CorrectionRussian            *string    `json:"correctionRussian"`
+	CorrectionChinese            *string    `json:"correctionChinese"`
+	CorrectionModifiedAt         *time.Time `json:"correctionModifiedAt"`
+	CorrectionNeedsRetranslation *bool      `json:"correctionNeedsRetranslation"`
 	// Learning entities (review center): shared reference fields ride
 	// sessionId/courseId/entryId plus the sourceAttachmentId/sourceReviewId/
 	// sourceTermId fields below; task title rides Title (course/attachment
@@ -210,21 +226,22 @@ type PullResponse struct {
 }
 
 type SyncStatusResponse struct {
-	SchemaVersion          int       `json:"schemaVersion"`
-	MinClientSchemaVersion int       `json:"minClientSchemaVersion"`
-	MaxClientSchemaVersion int       `json:"maxClientSchemaVersion"`
-	ChangeLogTail          int64     `json:"changeLogTail"`
-	SessionCount           int       `json:"sessionCount"`
-	EntryCount             int       `json:"entryCount"`
-	CourseCount            int       `json:"courseCount"`
-	NoteCount              int       `json:"noteCount"`
-	ReviewCount            int       `json:"reviewCount"`
-	AttachmentCount        int       `json:"attachmentCount"`
-	TermCount              int       `json:"termCount"`
-	StudyCardCount         int       `json:"studyCardCount"`
-	StudyTaskCount         int       `json:"studyTaskCount"`
-	PendingCount           int       `json:"pendingCount"`
-	ServerTime             time.Time `json:"serverTime"`
+	SchemaVersion             int       `json:"schemaVersion"`
+	MinClientSchemaVersion    int       `json:"minClientSchemaVersion"`
+	MaxClientSchemaVersion    int       `json:"maxClientSchemaVersion"`
+	ChangeLogTail             int64     `json:"changeLogTail"`
+	SessionCount              int       `json:"sessionCount"`
+	EntryCount                int       `json:"entryCount"`
+	CourseCount               int       `json:"courseCount"`
+	NoteCount                 int       `json:"noteCount"`
+	ReviewCount               int       `json:"reviewCount"`
+	AttachmentCount           int       `json:"attachmentCount"`
+	TermCount                 int       `json:"termCount"`
+	StudyCardCount            int       `json:"studyCardCount"`
+	StudyTaskCount            int       `json:"studyTaskCount"`
+	TranscriptCorrectionCount int       `json:"transcriptCorrectionCount"`
+	PendingCount              int       `json:"pendingCount"`
+	ServerTime                time.Time `json:"serverTime"`
 }
 
 // Entity constants (wire strings). "attachment" (11 chars) stays within
@@ -241,6 +258,9 @@ const (
 	EntityTerm        = "term"
 	EntityStudyCard   = "study_card"
 	EntityStudyTask   = "study_task"
+	// 21 chars — fits the VARCHAR(32) entity_type columns widened by
+	// migration 00008.
+	EntityTranscriptCorrection = "transcript_correction"
 )
 
 func validEntityType(t string) bool {
@@ -248,7 +268,8 @@ func validEntityType(t string) bool {
 		t == EntityBookmark || t == EntityFavorite ||
 		t == EntityCourse || t == EntityNote ||
 		t == EntityStudyReview || t == EntityAttachment ||
-		t == EntityTerm || t == EntityStudyCard || t == EntityStudyTask
+		t == EntityTerm || t == EntityStudyCard || t == EntityStudyTask ||
+		t == EntityTranscriptCorrection
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -280,8 +301,10 @@ type entryRecord struct {
 	RussianText       string  `json:"russianText"`
 	ChineseText       *string `json:"chineseText"`
 	TranslationStatus string  `json:"translationStatus"`
-	ServerVersion     int     `json:"serverVersion"`
-	Deleted           bool    `json:"deleted"`
+	// "audio" | "legacy" (omitted when empty for wire compatibility).
+	TimeSource    string `json:"timeSource,omitempty"`
+	ServerVersion int    `json:"serverVersion"`
+	Deleted       bool   `json:"deleted"`
 }
 
 type bookmarkRecord struct {
@@ -321,8 +344,11 @@ type noteRecord struct {
 	SessionID     string  `json:"sessionId"`
 	AnchorEntryID *string `json:"anchorEntryId,omitempty"`
 	NoteText      string  `json:"noteText"`
-	ServerVersion int     `json:"serverVersion"`
-	Deleted       bool    `json:"deleted"`
+	// Classroom-relative position when the note was taken (omitted when
+	// the note has none — the client falls back to createdAt-relative).
+	TimeOffset    *float64 `json:"noteTimeOffset,omitempty"`
+	ServerVersion int      `json:"serverVersion"`
+	Deleted       bool     `json:"deleted"`
 }
 
 type studyReviewRecord struct {
@@ -435,4 +461,19 @@ type studyTaskRecord struct {
 	CompletedAt   *time.Time `json:"taskCompletedAt,omitempty"`
 	ServerVersion int        `json:"serverVersion"`
 	Deleted       bool       `json:"deleted"`
+}
+
+// transcriptCorrectionRecord: field names mirror the push payload (the
+// correctionXxx family) so iOS decodes records and conflict payloads with
+// the same CodingKeys. CorrectionChinese preserves nil-vs-empty.
+type transcriptCorrectionRecord struct {
+	EntityType    string    `json:"entityType"`
+	ID            string    `json:"id"`
+	SessionID     string    `json:"sessionId"`
+	RussianText   string    `json:"correctionRussian"`
+	ChineseText   *string   `json:"correctionChinese,omitempty"`
+	ModifiedAt    time.Time `json:"correctionModifiedAt"`
+	NeedsRetrans  bool      `json:"correctionNeedsRetranslation"`
+	ServerVersion int       `json:"serverVersion"`
+	Deleted       bool      `json:"deleted"`
 }

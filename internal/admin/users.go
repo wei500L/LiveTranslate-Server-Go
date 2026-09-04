@@ -107,20 +107,20 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 	}
 
 	rows, err := q.Query(ctx, `
-		SELECT day::timestamptz, coalesce(c.count, 0)
+		SELECT d.day::timestamptz, coalesce(c.count, 0)
 		FROM generate_series(
 			date_trunc('day', now()) - interval '6 days',
 			date_trunc('day', now()),
 			interval '1 day'
-		) AS day
+		) AS d(day)
 		LEFT JOIN (
 			SELECT date_trunc('day', created_at) AS day, count(*) AS count
 			FROM users
 			WHERE created_at >= date_trunc('day', now()) - interval '6 days'
 			  AND deleted_at IS NULL
 			GROUP BY 1
-		) AS c ON c.day = day
-		ORDER BY day`)
+		) AS c ON c.day = d.day
+		ORDER BY d.day`)
 	if err != nil {
 		return nil, err
 	}

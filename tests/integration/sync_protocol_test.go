@@ -584,7 +584,9 @@ func forgedToken(e *env) string {
 // revert semantics. The entry's model text stays immutable.
 func TestSyncTranscriptCorrectionLifecycle(t *testing.T) {
 	e := newEnv(t, nil)
-	u := e.registerAndVerify("correction@example.com", "correct-horse-battery-9")
+	// Password deliberately NOT similar to the email local-part — the
+	// account-similarity policy rejects any 6-char overlap ("correc…").
+	u := e.registerAndVerify("correction@example.com", "quixotic-otter-jamboree-5")
 
 	sessID, entryID := uuid.New().String(), uuid.New().String()
 	_, _, out := e.push(t, u.AccessToken,

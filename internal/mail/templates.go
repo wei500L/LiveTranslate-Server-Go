@@ -32,7 +32,7 @@ type Message struct {
 
 // Common data every template receives. Values appear in mail only — never
 // in logs (see senders: bodies are never logged).
-type templateData struct {
+type TemplateData struct {
 	// Verification / reset codes and links.
 	Code string
 	Link string
@@ -66,9 +66,9 @@ func tplFor(id, ext string) *template.Template {
 // at call time only when the template files are missing — they are embedded,
 // so a missing file is a build-time authoring bug, caught on first use in
 // tests/dev (the same contract as html/template.Must in admin).
-func Render(id string, data *templateData) (*Message, error) {
+func Render(id string, data *TemplateData) (*Message, error) {
 	if data == nil {
-		data = &templateData{}
+		data = &TemplateData{}
 	}
 	// NOTE: values are interpolated RAW here; html/template applies
 	// contextual auto-escaping at execution time (text gets HTML-escaped,

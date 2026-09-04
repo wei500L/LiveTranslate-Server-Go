@@ -300,20 +300,23 @@ func (s *Service) createTargetedChallengeTx(ctx context.Context, q store.Q, user
 }
 
 // sendCodeEmail delivers a verification code. Failures are logged, never
-// fatal: the challenge exists and resend is available after the cooldown.
-func (s *Service) sendCodeEmail(ctx context.Context, email, plain string) {
+// fatal — but a transport failure CONSUMES the challenge so the user can
+// request a new code without waiting out the resend cooldown.
+func (s *Service) sendCodeEmail(ctx context.Context, email, plain string, challengeID uuid.UUID) {
 	msg, err := mail.Render(mail.TemplateVerifyCode, &mail.TemplateData{
 		Code:          plain,
 		VerifyMinutes: int(s.cfg.EmailVerifyTTL.Minutes()),
 	})
 	if err != nil {
 		s.log.Error("verification mail render failed", "err", err.Error())
+		_ = store.ConsumeChallenge(ctx, s.db.Q(), challengeID)
 		return
 	}
 	msg.To = email
 	if err := s.mailer.Send(ctx, msg); err != nil {
 		// Never log the body — it carries the code.
 		s.log.Error("verification email delivery failed", "err", err.Error())
+		_ = store.ConsumeChallenge(ctx, s.db.Q(), challengeID)
 	}
 }
 
@@ -804,8 +807,9 @@ func (s *Service) ForgotPassword(ctx context.Context, rawEmail, ip string) error
 
 // sendResetEmail renders the password-reset mail. The HTTPS link comes
 // from PUBLIC_BASE_URL; when no public URL is configured the mail carries
-// the bare token instead (legacy manual-paste flow).
-func (s *Service) sendResetEmail(ctx context.Context, email, plain string) {
+// the bare token instead (legacy manual-paste flow). A transport failure
+// invalidates the token so the user can immediately request a new one.
+func (s *Service) sendResetEmail(ctx context.Context, email, plain string, tokenID uuid.UUID) {
 	link := s.cfg.ResetLinkURL(plain)
 	msg, err := mail.Render(mail.TemplatePasswordReset, &mail.TemplateData{
 		Code: plain, Link: link,
@@ -813,11 +817,13 @@ func (s *Service) sendResetEmail(ctx context.Context, email, plain string) {
 	})
 	if err != nil {
 		s.log.Error("reset mail render failed", "err", err.Error())
+		_ = store.InvalidatePasswordResetToken(ctx, s.db.Q(), tokenID)
 		return
 	}
 	msg.To = email
 	if err := s.mailer.Send(ctx, msg); err != nil {
 		s.log.Error("reset email delivery failed", "err", err.Error())
+		_ = store.InvalidatePasswordResetToken(ctx, s.db.Q(), tokenID)
 	}
 }
 

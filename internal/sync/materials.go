@@ -268,6 +268,10 @@ type assistantMessageRow struct {
 	scopeMatID   *uuid.UUID
 	scopeSessID  *uuid.UUID
 	scopePageNum int
+	mode         string  // text | visual (00011; 'text' for pre-00011 rows)
+	visualEvid   *string // JSONB as string (00011)
+	answer       *string // JSONB as string (00011)
+	modelName    string  // 00011
 	serverVer    int
 	createdAt    time.Time
 	updatedAt    time.Time
@@ -279,10 +283,12 @@ func fetchAssistantMessage(ctx context.Context, q store.Q, userID, id uuid.UUID)
 	err := q.QueryRow(ctx, `
 		SELECT id, user_id, thread_id, role, text, citations::text,
 		       scope_material_id, scope_session_id, scope_page_number,
+		       mode, visual_evidence::text, answer::text, model_name,
 		       server_version, created_at, updated_at, deleted_at
 		FROM assistant_messages WHERE id = $1 AND user_id = $2`, id, userID,
 	).Scan(&m.id, &m.userID, &m.threadID, &m.role, &m.text, &m.citations,
 		&m.scopeMatID, &m.scopeSessID, &m.scopePageNum,
+		&m.mode, &m.visualEvid, &m.answer, &m.modelName,
 		&m.serverVer, &m.createdAt, &m.updatedAt, &m.deletedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -305,6 +311,22 @@ func assistantMessageRecordJSON(m *assistantMessageRow) json.RawMessage {
 	if m.citations != nil && *m.citations != "" {
 		citations = m.citations
 	}
+	var mode *string
+	if m.mode != "" && m.mode != "text" {
+		mode = &m.mode
+	}
+	var evidence *string
+	if m.visualEvid != nil && *m.visualEvid != "" {
+		evidence = m.visualEvid
+	}
+	var answer *string
+	if m.answer != nil && *m.answer != "" {
+		answer = m.answer
+	}
+	var model *string
+	if m.modelName != "" {
+		model = &m.modelName
+	}
 	b, _ := json.Marshal(assistantMessageRecord{
 		EntityType: EntityAssistantMessage, ID: m.id.String(),
 		ThreadID: m.threadID.String(), Role: m.role, Text: m.text,
@@ -312,6 +334,10 @@ func assistantMessageRecordJSON(m *assistantMessageRow) json.RawMessage {
 		ScopeMaterial:   optUUIDString(m.scopeMatID),
 		ScopeSession:    optUUIDString(m.scopeSessID),
 		ScopePageNumber: m.scopePageNum,
+		Mode:            mode,
+		VisualEvidence:  evidence,
+		Answer:          answer,
+		ModelName:       model,
 		ServerVersion:   m.serverVer, Deleted: m.deletedAt != nil,
 	})
 	return b
@@ -946,6 +972,40 @@ func (s *Service) applyAssistantMessage(ctx context.Context, q store.Q, userID u
 	if p.AssistantCitations != nil && *p.AssistantCitations != "" {
 		citations = p.AssistantCitations
 	}
+	// Visual Q&A (00011): mode must be a known value; the evidence and
+	// answer payloads must be valid JSON (they land in JSONB columns —
+	// invalid JSON would abort the whole batch's transaction).
+	mode := "text"
+	if p.AssistantMode != nil && *p.AssistantMode != "" {
+		mode = *p.AssistantMode
+	}
+	if mode != "text" && mode != "visual" {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	visualEvidence := validJSONPayload(p.AssistantEvidence)
+	if p.AssistantEvidence != nil && *p.AssistantEvidence != "" && visualEvidence == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	answer := validJSONPayload(p.AssistantAnswer)
+	if p.AssistantAnswer != nil && *p.AssistantAnswer != "" && answer == nil {
+		res := rejected(item, "schema")
+		if err := storeLedger(ctx, q, userID, item, res); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	modelName := ""
+	if p.AssistantModel != nil {
+		modelName = *p.AssistantModel
+	}
 	scopeMaterial := refOrNil(p.MaterialID)
 	scopeSession := refOrNil(p.SessionID)
 	scopePage := 0
@@ -959,11 +1019,14 @@ func (s *Service) applyAssistantMessage(ctx context.Context, q store.Q, userID u
 			INSERT INTO assistant_messages
 				(id, user_id, thread_id, role, text, citations,
 				 scope_material_id, scope_session_id, scope_page_number,
+				 mode, visual_evidence, answer, model_name,
 				 server_version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, 1, now(), now())
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9,
+			        $10, $11::jsonb, $12::jsonb, $13, 1, now(), now())
 			RETURNING updated_at`,
 			item.EntityID, userID, *threadID, role, text, citations,
 			scopeMaterial, scopeSession, scopePage,
+			mode, visualEvidence, answer, modelName,
 		).Scan(&updatedAt)
 		if err != nil {
 			return nil, err
@@ -1001,12 +1064,26 @@ func (s *Service) applyAssistantMessage(ctx context.Context, q store.Q, userID u
 	}
 
 	// Merge: present pointers win (messages are append-only in practice;
-	// the merge path only guards a same-id race).
+	// the merge path only guards a same-id race). Absent/empty evidence /
+	// answer / model KEEP the stored value — a rebase never blanks a
+	// complete visual answer with "".
 	if text == "" {
 		text = obj.text
 	}
 	if citations == nil {
 		citations = obj.citations
+	}
+	if p.AssistantMode == nil {
+		mode = obj.mode
+	}
+	if visualEvidence == nil {
+		visualEvidence = obj.visualEvid
+	}
+	if answer == nil {
+		answer = obj.answer
+	}
+	if modelName == "" {
+		modelName = obj.modelName
 	}
 	var version int
 	var updatedAt time.Time
@@ -1014,11 +1091,14 @@ func (s *Service) applyAssistantMessage(ctx context.Context, q store.Q, userID u
 		UPDATE assistant_messages
 		SET thread_id = $3, role = $4, text = $5, citations = $6::jsonb,
 		    scope_material_id = $7, scope_session_id = $8, scope_page_number = $9,
+		    mode = $10, visual_evidence = $11::jsonb, answer = $12::jsonb,
+		    model_name = $13,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
 		item.EntityID, userID, *threadID, role, text, citations,
 		scopeMaterial, scopeSession, scopePage,
+		mode, visualEvidence, answer, modelName,
 	).Scan(&version, &updatedAt)
 	if err != nil {
 		return nil, err
@@ -1031,6 +1111,16 @@ func (s *Service) applyAssistantMessage(ctx context.Context, q store.Q, userID u
 		return nil, err
 	}
 	return res, nil
+}
+
+// validJSONPayload returns the payload when it is non-empty AND valid
+// JSON (JSONB columns reject anything else and would abort the batch's
+// transaction); nil otherwise.
+func validJSONPayload(p *string) *string {
+	if p == nil || *p == "" || !json.Valid([]byte(*p)) {
+		return nil
+	}
+	return p
 }
 
 // --- Cascades --------------------------------------------------------------------------

@@ -251,11 +251,19 @@ type PushPayload struct {
 	MaterialAnnotationKind *string `json:"materialAnnotationKind"`
 	// Course assistant: thread parent (required for messages); a message's
 	// question scope rides the shared MaterialID/SessionID/MaterialPageNumber;
-	// citations ride as a JSON STRING in AssistantCitations.
+	// citations ride as a JSON STRING in AssistantCitations. Visual Q&A adds
+	// the turn mode (text|visual), the evidence SNAPSHOT (JSON string:
+	// stable source ids + normalized crop rects — never image bytes), the
+	// structured answer payload (JSON string) and the answer model name.
+	// Absent/empty keeps the stored value (a merge never blanks an answer).
 	ThreadID           *uuid.UUID `json:"threadId"`
 	AssistantRole      *string    `json:"assistantRole"`
 	AssistantText      *string    `json:"assistantText"`
 	AssistantCitations *string    `json:"assistantCitations"`
+	AssistantMode      *string    `json:"assistantMode"`
+	AssistantEvidence  *string    `json:"assistantEvidence"`
+	AssistantAnswer    *string    `json:"assistantAnswer"`
+	AssistantModel     *string    `json:"assistantModel"`
 }
 
 type PushItem struct {
@@ -708,6 +716,12 @@ type assistantMessageRecord struct {
 	ScopeMaterial   *string `json:"materialId,omitempty"`
 	ScopeSession    *string `json:"sessionId,omitempty"`
 	ScopePageNumber int     `json:"materialPageNumber,omitempty"`
-	ServerVersion   int     `json:"serverVersion"`
-	Deleted         bool    `json:"deleted"`
+	// Visual Q&A (00011): turn mode, evidence snapshot, structured answer
+	// and the producing model — JSON strings on the wire, matching push.
+	Mode           *string `json:"assistantMode,omitempty"`
+	VisualEvidence *string `json:"assistantEvidence,omitempty"`
+	Answer         *string `json:"assistantAnswer,omitempty"`
+	ModelName      *string `json:"assistantModel,omitempty"`
+	ServerVersion  int     `json:"serverVersion"`
+	Deleted        bool    `json:"deleted"`
 }

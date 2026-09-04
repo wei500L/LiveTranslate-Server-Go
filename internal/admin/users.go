@@ -42,11 +42,17 @@ type DashboardStats struct {
 	MaterialPages     int
 	AssistantThreads  int
 	AssistantMessages int
-	RecentSyncAt      *time.Time
-	MailSent          int64 // from the in-process metrics counters
-	MailFailed        int64
-	APIErrors         int64
-	HTTPRequests      int64
+	// Exam center: exams, topics, study plans, items and activities.
+	Exams           int
+	ExamTopics      int
+	StudyPlans      int
+	StudyPlanItems  int
+	StudyActivities int
+	RecentSyncAt    *time.Time
+	MailSent        int64 // from the in-process metrics counters
+	MailFailed      int64
+	APIErrors       int64
+	HTTPRequests    int64
 	// RegistrationTrend is per-day counts for the last 7 days, oldest first.
 	RegistrationTrend []TrendPoint
 	RegistrationMode  string
@@ -82,6 +88,11 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 			(SELECT count(*) FROM material_pages WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM assistant_threads WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM assistant_messages WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM exams WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM exam_topics WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM study_plans WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM study_plan_items WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM study_activities WHERE deleted_at IS NULL),
 			(SELECT max(created_at) FROM sync_changes)
 	`).Scan(&d.UsersTotal, &d.UsersActive, &d.UsersPending, &d.UsersSuspended,
 		&d.UsersUnverified, &d.RegisteredToday, &d.DeviceRows, &d.LiveSessions,
@@ -89,6 +100,7 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 		&d.GlossaryTerms, &d.StudyCards, &d.StudyTasks,
 		&d.TranscriptCorrections, &d.CourseSchedules, &d.ScheduleExceptions,
 		&d.CourseMaterials, &d.MaterialPages, &d.AssistantThreads, &d.AssistantMessages,
+		&d.Exams, &d.ExamTopics, &d.StudyPlans, &d.StudyPlanItems, &d.StudyActivities,
 		&d.RecentSyncAt)
 	if err != nil {
 		return nil, err

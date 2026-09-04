@@ -1085,6 +1085,16 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyAssistantThread(ctx, q, userID, item)
 	case EntityAssistantMessage:
 		return s.applyAssistantMessage(ctx, q, userID, item)
+	case EntityExam:
+		return s.applyExam(ctx, q, userID, item)
+	case EntityExamTopic:
+		return s.applyExamTopic(ctx, q, userID, item)
+	case EntityStudyPlan:
+		return s.applyStudyPlan(ctx, q, userID, item)
+	case EntityStudyPlanItem:
+		return s.applyStudyPlanItem(ctx, q, userID, item)
+	case EntityStudyActivity:
+		return s.applyStudyActivity(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -2261,6 +2271,12 @@ func (s *Service) applyCourse(ctx context.Context, q store.Q, userID uuid.UUID, 
 			return nil, err
 		}
 		if err := s.detachCourseFromAssistantThreads(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
+		// Exam-center entities survive too: exams transfer to 未归类 and
+		// study activities keep their minutes with the course attribution
+		// cleared (the real learning-time history never dies with a course).
+		if err := s.detachCourseFromExams(ctx, q, userID, item.EntityID); err != nil {
 			return nil, err
 		}
 		// Schedules, however, are meaningless without their course — they
@@ -4559,6 +4575,36 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return assistantMessageRecordJSON(obj), nil
+	case EntityExam:
+		obj, err := fetchExam(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return examRecordJSON(obj), nil
+	case EntityExamTopic:
+		obj, err := fetchExamTopic(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return examTopicRecordJSON(obj), nil
+	case EntityStudyPlan:
+		obj, err := fetchStudyPlan(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyPlanRecordJSON(obj), nil
+	case EntityStudyPlanItem:
+		obj, err := fetchStudyPlanItem(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyPlanItemRecordJSON(obj), nil
+	case EntityStudyActivity:
+		obj, err := fetchStudyActivity(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return studyActivityRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -4569,6 +4615,7 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 	q := s.db.Q()
 	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections, schedules, exceptions int
 	var materials, materialPages, materialAnnotations, assistantThreads, assistantMessages int
+	var exams, examTopics, studyPlans, studyPlanItems, studyActivities int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -4588,9 +4635,15 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM material_pages WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM material_annotations WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM assistant_threads WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM assistant_messages WHERE user_id = $1 AND deleted_at IS NULL)`,
+			(SELECT count(*) FROM assistant_messages WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM exams WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM exam_topics WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_plans WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_plan_items WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM study_activities WHERE user_id = $1 AND deleted_at IS NULL)`,
 		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions,
-		&materials, &materialPages, &materialAnnotations, &assistantThreads, &assistantMessages)
+		&materials, &materialPages, &materialAnnotations, &assistantThreads, &assistantMessages,
+		&exams, &examTopics, &studyPlans, &studyPlanItems, &studyActivities)
 	if err != nil {
 		return nil, err
 	}
@@ -4616,6 +4669,11 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		MaterialAnnotationCount:   materialAnnotations,
 		AssistantThreadCount:      assistantThreads,
 		AssistantMessageCount:     assistantMessages,
+		ExamCount:                 exams,
+		ExamTopicCount:            examTopics,
+		StudyPlanCount:            studyPlans,
+		StudyPlanItemCount:        studyPlanItems,
+		StudyActivityCount:        studyActivities,
 		PendingCount:              0,
 		ServerTime:                time.Now(),
 	}, nil

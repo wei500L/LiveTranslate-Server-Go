@@ -264,6 +264,67 @@ type PushPayload struct {
 	AssistantEvidence  *string    `json:"assistantEvidence"`
 	AssistantAnswer    *string    `json:"assistantAnswer"`
 	AssistantModel     *string    `json:"assistantModel"`
+	// Exam center (00012). Exam title/plan title/plan-item title/topic
+	// title ride the shared Title; the course reference rides the shared
+	// CourseID sentinel field; the exam reference rides ExamId; the plan
+	// reference rides PlanId; the plan-item reference rides PlanItemId.
+	// Dates are YYYY-MM-DD strings (DATE columns, the course-schedule
+	// convention); times are wall-clock seconds since midnight (-1 =
+	// unknown). The candidate origin snapshot (ExamSource), the topic
+	// source and the plan-item jump target ride as JSON STRINGS (the
+	// citations convention) — never image bytes, file paths or raw model
+	// responses.
+	ExamKind          *string    `json:"examKind"`
+	ExamDate          *string    `json:"examDate"`
+	ExamStartSecs     *int       `json:"examStartSecs"`
+	ExamEndSecs       *int       `json:"examEndSecs"`
+	ExamLocation      *string    `json:"examLocation"`
+	ExamScope         *string    `json:"examScope"`
+	ExamNote          *string    `json:"examNote"`
+	ExamTargetScore   *string    `json:"examTargetScore"`
+	ExamStatus        *string    `json:"examStatus"`
+	ExamOrigin        *string    `json:"examOrigin"`
+	ExamSource        *string    `json:"examSource"`
+	TopicDetail       *string    `json:"topicDetail"`
+	TopicImportance   *string    `json:"topicImportance"`
+	TopicSelfRating   *string    `json:"topicSelfRating"`
+	TopicStatus       *string    `json:"topicStatus"`
+	TopicSource       *string    `json:"topicSource"`
+	TopicUserEdited   *bool      `json:"topicUserEdited"`
+	PlanStartDate     *string    `json:"planStartDate"`
+	PlanEndDate       *string    `json:"planEndDate"`
+	PlanWeekdayMins   *int       `json:"planWeekdayMinutes"`
+	PlanWeekendMins   *int       `json:"planWeekendMinutes"`
+	PlanRestDays      *string    `json:"planRestDays"`
+	PlanFinishEarly   *int       `json:"planFinishEarlyDays"`
+	PlanIncludeCards  *bool      `json:"planIncludeCards"`
+	PlanIncludeTasks  *bool      `json:"planIncludeTasks"`
+	PlanMaterials     *bool      `json:"planIncludeMaterials"`
+	PlanSessions      *bool      `json:"planIncludeSessions"`
+	PlanFocusTopics   *string    `json:"planFocusTopics"`
+	PlanBlockedTimes  *string    `json:"planBlockedTimes"`
+	PlanStatus        *string    `json:"planStatus"`
+	PlanItemDate      *string    `json:"planItemDate"`
+	PlanItemKind      *string    `json:"planItemKind"`
+	PlanItemEstMins   *int       `json:"planItemEstimatedMinutes"`
+	PlanItemActual    *int       `json:"planItemActualMinutes"`
+	PlanItemStatus    *string    `json:"planItemStatus"`
+	PlanItemStatusAt  *time.Time `json:"planItemStatusChangedAt"`
+	PlanItemOrder     *int       `json:"planItemOrder"`
+	PlanItemSource    *string    `json:"planItemSource"`
+	PlanItemUserNote  *string    `json:"planItemUserNote"`
+	PlanItemUserEdit  *bool      `json:"planItemUserEdited"`
+	ActivityStatus    *string    `json:"activityStatus"`
+	ActivityStartedAt *time.Time `json:"activityStartedAt"`
+	ActivityEndedAt   *time.Time `json:"activityEndedAt"`
+	ActivityDuration  *int64     `json:"activityDurationSeconds"`
+	ActivityNote      *string    `json:"activityNote"`
+	// Shared exam-family references. Absent (nil) keeps the stored value;
+	// uuid.Nil explicitly CLEARS it.
+	ExamId     *uuid.UUID `json:"examId"`
+	PlanId     *uuid.UUID `json:"planId"`
+	PlanItemId *uuid.UUID `json:"planItemId"`
+	TopicId    *uuid.UUID `json:"topicId"`
 }
 
 type PushItem struct {
@@ -337,6 +398,11 @@ type SyncStatusResponse struct {
 	MaterialAnnotationCount   int       `json:"materialAnnotationCount"`
 	AssistantThreadCount      int       `json:"assistantThreadCount"`
 	AssistantMessageCount     int       `json:"assistantMessageCount"`
+	ExamCount                 int       `json:"examCount"`
+	ExamTopicCount            int       `json:"examTopicCount"`
+	StudyPlanCount            int       `json:"studyPlanCount"`
+	StudyPlanItemCount        int       `json:"studyPlanItemCount"`
+	StudyActivityCount        int       `json:"studyActivityCount"`
 	PendingCount              int       `json:"pendingCount"`
 	ServerTime                time.Time `json:"serverTime"`
 }
@@ -368,6 +434,13 @@ const (
 	EntityMaterialAnnotation = "material_annotation"
 	EntityAssistantThread    = "assistant_thread"
 	EntityAssistantMessage   = "assistant_message"
+	// Exam center (00012): 4 / 10 / 10 / 15 / 14 chars — all fit the
+	// VARCHAR(32) entity_type columns.
+	EntityExam          = "exam"
+	EntityExamTopic     = "exam_topic"
+	EntityStudyPlan     = "study_plan"
+	EntityStudyPlanItem = "study_plan_item"
+	EntityStudyActivity = "study_activity"
 )
 
 func validEntityType(t string) bool {
@@ -380,7 +453,10 @@ func validEntityType(t string) bool {
 		t == EntityCourseSchedule || t == EntityScheduleException ||
 		t == EntityMaterial || t == EntityMaterialPage ||
 		t == EntityMaterialAnnotation ||
-		t == EntityAssistantThread || t == EntityAssistantMessage
+		t == EntityAssistantThread || t == EntityAssistantMessage ||
+		t == EntityExam || t == EntityExamTopic ||
+		t == EntityStudyPlan || t == EntityStudyPlanItem ||
+		t == EntityStudyActivity
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -724,4 +800,103 @@ type assistantMessageRecord struct {
 	ModelName      *string `json:"assistantModel,omitempty"`
 	ServerVersion  int     `json:"serverVersion"`
 	Deleted        bool    `json:"deleted"`
+}
+
+// Exam-center records (00012): field names mirror the push payload (the
+// examXxx / topicXxx / planXxx / planItemXxx / activityXxx families) so
+// iOS decodes records and conflict payloads with the same CodingKeys.
+// Dates are YYYY-MM-DD strings; times are wall-clock seconds since
+// midnight (-1 = unknown / no end). Source snapshots ride as JSON strings
+// (the citations convention).
+type examRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	CourseID      *string `json:"courseId,omitempty"`
+	Kind          string  `json:"examKind"`
+	Date          string  `json:"examDate"`
+	StartSecs     int     `json:"examStartSecs"`
+	EndSecs       int     `json:"examEndSecs"`
+	Location      string  `json:"examLocation"`
+	Scope         string  `json:"examScope"`
+	Note          string  `json:"examNote"`
+	TargetScore   string  `json:"examTargetScore"`
+	Status        string  `json:"examStatus"`
+	Origin        string  `json:"examOrigin"`
+	Source        *string `json:"examSource,omitempty"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
+}
+
+type examTopicRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	ExamID        string  `json:"examId"`
+	Title         string  `json:"title"`
+	Detail        string  `json:"topicDetail"`
+	Importance    string  `json:"topicImportance"`
+	SelfRating    string  `json:"topicSelfRating"`
+	Status        string  `json:"topicStatus"`
+	Source        *string `json:"topicSource,omitempty"`
+	UserEdited    bool    `json:"topicUserEdited"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
+}
+
+type studyPlanRecord struct {
+	EntityType       string  `json:"entityType"`
+	ID               string  `json:"id"`
+	ExamID           string  `json:"examId"`
+	Title            string  `json:"title"`
+	StartDate        string  `json:"planStartDate"`
+	EndDate          string  `json:"planEndDate"`
+	WeekdayMinutes   int     `json:"planWeekdayMinutes"`
+	WeekendMinutes   int     `json:"planWeekendMinutes"`
+	RestDays         *string `json:"planRestDays,omitempty"`
+	FinishEarlyDays  int     `json:"planFinishEarlyDays"`
+	IncludeCards     bool    `json:"planIncludeCards"`
+	IncludeTasks     bool    `json:"planIncludeTasks"`
+	IncludeMaterials bool    `json:"planIncludeMaterials"`
+	IncludeSessions  bool    `json:"planIncludeSessions"`
+	FocusTopics      *string `json:"planFocusTopics,omitempty"`
+	BlockedTimes     *string `json:"planBlockedTimes,omitempty"`
+	Status           string  `json:"planStatus"`
+	ServerVersion    int     `json:"serverVersion"`
+	Deleted          bool    `json:"deleted"`
+}
+
+type studyPlanItemRecord struct {
+	EntityType       string     `json:"entityType"`
+	ID               string     `json:"id"`
+	PlanID           string     `json:"planId"`
+	ExamID           *string    `json:"examId,omitempty"`
+	Date             string     `json:"planItemDate"`
+	Title            string     `json:"title"`
+	Kind             string     `json:"planItemKind"`
+	EstimatedMinutes int        `json:"planItemEstimatedMinutes"`
+	ActualMinutes    int        `json:"planItemActualMinutes"`
+	Status           string     `json:"planItemStatus"`
+	StatusChangedAt  *time.Time `json:"planItemStatusChangedAt,omitempty"`
+	Order            int        `json:"planItemOrder"`
+	Source           *string    `json:"planItemSource,omitempty"`
+	UserNote         string     `json:"planItemUserNote"`
+	UserEdited       bool       `json:"planItemUserEdited"`
+	ServerVersion    int        `json:"serverVersion"`
+	Deleted          bool       `json:"deleted"`
+}
+
+type studyActivityRecord struct {
+	EntityType      string     `json:"entityType"`
+	ID              string     `json:"id"`
+	PlanItemID      *string    `json:"planItemId,omitempty"`
+	ExamID          *string    `json:"examId,omitempty"`
+	CourseID        *string    `json:"courseId,omitempty"`
+	TopicID         *string    `json:"topicId,omitempty"`
+	StartedAt       time.Time  `json:"activityStartedAt"`
+	EndedAt         *time.Time `json:"activityEndedAt,omitempty"`
+	DurationSeconds int        `json:"activityDurationSeconds"`
+	Status          string     `json:"activityStatus"`
+	Note            string     `json:"activityNote"`
+	ServerVersion   int        `json:"serverVersion"`
+	Deleted         bool       `json:"deleted"`
 }

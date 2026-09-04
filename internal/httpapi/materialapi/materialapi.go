@@ -18,7 +18,8 @@
 // live and belong to that user before any byte moves. Materials that
 // borrow a classroom attachment's files (source_attachment_id) have no
 // file of their own — uploads/downloads on them return 404 (honest
-// absence, never a wrong file).
+// absence, never a wrong file). Link materials (format 'link') are the
+// same: the saved URL is the content; no bytes ever move.
 package materialapi
 
 import (
@@ -109,6 +110,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusNotFound, "material borrows an attachment's files")
 		return
 	}
+	if meta.IsLink {
+		// A link material IS the shared URL — there is nothing to upload.
+		httpapi.WriteDetail(w, http.StatusNotFound, "material is a link")
+		return
+	}
 
 	declaredHash := r.Header.Get("X-Content-Hash")
 	if declaredHash == "" {
@@ -170,6 +176,10 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusNotFound, "material borrows an attachment's files")
 		return
 	}
+	if meta.IsLink {
+		httpapi.WriteDetail(w, http.StatusNotFound, "material is a link")
+		return
+	}
 	f, size, err := h.files.Open(userID, id, storage.VariantOriginal)
 	if err != nil {
 		httpapi.WriteDetail(w, http.StatusNotFound, "file not uploaded yet")
@@ -209,7 +219,8 @@ func (h *Handler) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteDetail(w, http.StatusNotFound, "material not found")
 		return
 	}
-	uploaded := !meta.BorrowsAttachment && h.files.Has(userID, id, storage.VariantOriginal)
+	uploaded := !meta.BorrowsAttachment && !meta.IsLink &&
+		h.files.Has(userID, id, storage.VariantOriginal)
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"materialId": id.String(),
 		"uploaded":   uploaded,

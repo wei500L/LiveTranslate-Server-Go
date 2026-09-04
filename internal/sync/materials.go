@@ -46,6 +46,8 @@ type materialRow struct {
 	contentHash      string
 	pageCount        int
 	sourceAttachment *uuid.UUID
+	sourceURL        string
+	sharedText       string
 	extractionStatus string
 	digestStatus     string
 	digest           *string // JSONB as string
@@ -66,6 +68,7 @@ func fetchMaterial(ctx context.Context, q store.Q, userID, id uuid.UUID) (*mater
 		SELECT id, user_id, course_id, session_id, occurrence_key,
 		       title, original_file_name, mime_type, kind, format,
 		       file_size, content_hash, page_count, source_attachment_id,
+		       source_url, shared_text,
 		       extraction_status, digest_status, digest::text,
 		       digest_model, digest_generated_at, digest_source_hash,
 		       last_read_page, last_opened_at,
@@ -107,7 +110,8 @@ func materialRecordJSON(m *materialRow) json.RawMessage {
 		SourceAttach:  optUUIDString(m.sourceAttachment),
 		Kind:          m.kind, MimeType: m.mimeType, FileName: m.fileName,
 		Format: m.format, FileSize: m.fileSize, ContentHash: m.contentHash,
-		PageCount: m.pageCount, Extraction: m.extractionStatus,
+		PageCount: m.pageCount, SourceURL: m.sourceURL, SharedText: m.sharedText,
+		Extraction:   m.extractionStatus,
 		DigestStatus: m.digestStatus, Digest: digest,
 		DigestModel: m.digestModel, DigestAt: m.digestGenerated,
 		DigestSrcHash: m.digestSourceHash,
@@ -351,7 +355,8 @@ var validMaterialKinds = map[string]bool{
 }
 
 var validMaterialFormats = map[string]bool{
-	"pdf": true, "text": true, "markdown": true, "image": true, "other": true,
+	"pdf": true, "text": true, "markdown": true, "image": true,
+	"link": true, "other": true,
 }
 
 var validMaterialExtraction = map[string]bool{
@@ -448,6 +453,16 @@ func (s *Service) applyMaterial(ctx context.Context, q store.Q, userID uuid.UUID
 	if p.MaterialHash != nil {
 		hash = *p.MaterialHash
 	}
+	// sourceURL is insert-only identity (a link material IS the URL it
+	// was shared as); sharedText is user-editable metadata.
+	sourceURL := ""
+	if p.MaterialSourceURL != nil {
+		sourceURL = *p.MaterialSourceURL
+	}
+	sharedText := ""
+	if p.MaterialSharedText != nil {
+		sharedText = *p.MaterialSharedText
+	}
 	title := ""
 	if p.Title != nil {
 		title = *p.Title
@@ -490,6 +505,7 @@ func (s *Service) applyMaterial(ctx context.Context, q store.Q, userID uuid.UUID
 				(id, user_id, course_id, session_id, occurrence_key,
 				 title, original_file_name, mime_type, kind, format,
 				 file_size, content_hash, page_count, source_attachment_id,
+				 source_url, shared_text,
 				 extraction_status, digest_status, digest,
 				 digest_model, digest_generated_at, digest_source_hash,
 				 last_read_page, last_opened_at,
@@ -497,14 +513,16 @@ func (s *Service) applyMaterial(ctx context.Context, q store.Q, userID uuid.UUID
 			VALUES ($1, $2, $3, $4, $5,
 			        $6, $7, $8, $9, $10,
 			        $11, $12, $13, $14,
-			        $15, $16, $17::jsonb,
-			        $18, $19, $20,
-			        $21, $22,
+			        $15, $16,
+			        $17, $18, $19::jsonb,
+			        $20, $21, $22,
+			        $23, $24,
 			        1, now(), now())
 			RETURNING updated_at`,
 			item.EntityID, userID, courseID, sessionID, occurrenceKey,
 			title, fileName, mime, kind, format,
 			fileSize, hash, pageCount, sourceAttachment,
+			sourceURL, sharedText,
 			extraction, digestStatus, digest,
 			digestModel, digestAt, digestSrcHash,
 			lastReadPage, lastOpenedAt,
@@ -565,6 +583,11 @@ func (s *Service) applyMaterial(ctx context.Context, q store.Q, userID uuid.UUID
 	if lastOpenedAt == nil {
 		lastOpenedAt = obj.lastOpenedAt
 	}
+	// sharedText rides full desired state; an ABSENT payload field keeps
+	// the stored value (title convention — a merge never blanks text).
+	if p.MaterialSharedText == nil {
+		sharedText = obj.sharedText
+	}
 	courseID = mergeRef(obj.courseID, p.CourseID)
 	sessionID = mergeRef(obj.sessionID, p.SessionID)
 	sourceAttachment = mergeRef(obj.sourceAttachment, p.SourceAttachmentID)
@@ -576,15 +599,15 @@ func (s *Service) applyMaterial(ctx context.Context, q store.Q, userID uuid.UUID
 	err = q.QueryRow(ctx, `
 		UPDATE course_materials
 		SET course_id = $3, session_id = $4, occurrence_key = $5,
-		    title = $6, kind = $7, format = $8,
-		    extraction_status = $9, digest_status = $10, digest = $11::jsonb,
-		    digest_model = $12, digest_generated_at = $13, digest_source_hash = $14,
-		    last_read_page = $15, last_opened_at = $16,
+		    title = $6, kind = $7, format = $8, shared_text = $9,
+		    extraction_status = $10, digest_status = $11, digest = $12::jsonb,
+		    digest_model = $13, digest_generated_at = $14, digest_source_hash = $15,
+		    last_read_page = $16, last_opened_at = $17,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
 		item.EntityID, userID, courseID, sessionID, occurrenceKey,
-		title, kind, format,
+		title, kind, format, sharedText,
 		extraction, digestStatus, digest,
 		digestModel, digestAt, digestSrcHash,
 		lastReadPage, lastOpenedAt,
@@ -1287,6 +1310,9 @@ type MaterialMeta struct {
 	FileSize          int64
 	ContentHash       string
 	BorrowsAttachment bool
+	// A link material (format 'link') carries no file at all — the file
+	// routes refuse it exactly like the borrow case.
+	IsLink bool
 }
 
 // GetMaterialMeta loads the ownership/contract fields of one material for
@@ -1294,13 +1320,14 @@ type MaterialMeta struct {
 // row does not exist for this user.
 func GetMaterialMeta(ctx context.Context, q store.Q, userID, id uuid.UUID) (*MaterialMeta, error) {
 	var deletedAt *time.Time
-	var mime, hash string
+	var mime, hash, sourceURL string
 	var size int64
 	var sourceAttachment *uuid.UUID
 	err := q.QueryRow(ctx, `
-		SELECT mime_type, file_size, content_hash, source_attachment_id, deleted_at
+		SELECT mime_type, file_size, content_hash, source_attachment_id,
+		       source_url, deleted_at
 		FROM course_materials WHERE id = $1 AND user_id = $2`, id, userID,
-	).Scan(&mime, &size, &hash, &sourceAttachment, &deletedAt)
+	).Scan(&mime, &size, &hash, &sourceAttachment, &sourceURL, &deletedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -1313,5 +1340,6 @@ func GetMaterialMeta(ctx context.Context, q store.Q, userID, id uuid.UUID) (*Mat
 		FileSize:          size,
 		ContentHash:       hash,
 		BorrowsAttachment: sourceAttachment != nil,
+		IsLink:            sourceURL != "",
 	}, nil
 }

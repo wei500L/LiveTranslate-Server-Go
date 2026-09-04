@@ -228,6 +228,8 @@ type PushPayload struct {
 	MaterialFileSize      *int64     `json:"materialFileSize"`
 	MaterialHash          *string    `json:"materialHash"`
 	MaterialPageCount     *int       `json:"materialPageCount"`
+	MaterialSourceURL     *string    `json:"materialSourceURL"`
+	MaterialSharedText    *string    `json:"materialSharedText"`
 	MaterialExtraction    *string    `json:"materialExtraction"`
 	MaterialDigestStatus  *string    `json:"materialDigestStatus"`
 	MaterialDigest        *string    `json:"materialDigest"`
@@ -737,6 +739,8 @@ type courseMaterialRecord struct {
 	FileSize      int64      `json:"materialFileSize"`
 	ContentHash   string     `json:"materialHash"`
 	PageCount     int        `json:"materialPageCount"`
+	SourceURL     string     `json:"materialSourceURL"`
+	SharedText    string     `json:"materialSharedText"`
 	Extraction    string     `json:"materialExtraction"`
 	DigestStatus  string     `json:"materialDigestStatus"`
 	Digest        *string    `json:"materialDigest,omitempty"`

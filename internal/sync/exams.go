@@ -804,8 +804,8 @@ func (s *Service) applyStudyPlan(ctx context.Context, q store.Q, userID uuid.UUI
 		includeMaterials = *p.PlanMaterials
 	}
 	includeSessions := true
-	if p.PlanIncludeSessions != nil {
-		includeSessions = *p.PlanIncludeSessions
+	if p.PlanSessions != nil {
+		includeSessions = *p.PlanSessions
 	}
 
 	if obj == nil {
@@ -1099,8 +1099,8 @@ func (s *Service) applyStudyActivity(ctx context.Context, q store.Q, userID uuid
 	startedAt := *p.ActivityStartedAt
 	endedAt := p.ActivityEndedAt
 	duration := 0
-	if p.ActivityDurationSeconds != nil {
-		duration = int(*p.ActivityDurationSeconds)
+	if p.ActivityDuration != nil {
+		duration = int(*p.ActivityDuration)
 	}
 	note := ""
 	if p.ActivityNote != nil {

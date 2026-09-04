@@ -782,14 +782,14 @@ func (s *Service) applyStudyPlan(ctx context.Context, q store.Q, userID uuid.UUI
 	blockedTimes := validJSONPayload(p.PlanBlockedTimes)
 
 	weekdayMinutes, weekendMinutes, finishEarly := 60, 90, 0
-	if p.PlanWeekdayMinutes != nil {
-		weekdayMinutes = *p.PlanWeekdayMinutes
+	if p.PlanWeekdayMins != nil {
+		weekdayMinutes = *p.PlanWeekdayMins
 	}
-	if p.PlanWeekendMinutes != nil {
-		weekendMinutes = *p.PlanWeekendMinutes
+	if p.PlanWeekendMins != nil {
+		weekendMinutes = *p.PlanWeekendMins
 	}
-	if p.PlanFinishEarlyDays != nil {
-		finishEarly = *p.PlanFinishEarlyDays
+	if p.PlanFinishEarly != nil {
+		finishEarly = *p.PlanFinishEarly
 	}
 	includeCards := true
 	if p.PlanIncludeCards != nil {
@@ -800,8 +800,8 @@ func (s *Service) applyStudyPlan(ctx context.Context, q store.Q, userID uuid.UUI
 		includeTasks = *p.PlanIncludeTasks
 	}
 	includeMaterials := true
-	if p.PlanIncludeMaterials != nil {
-		includeMaterials = *p.PlanIncludeMaterials
+	if p.PlanMaterials != nil {
+		includeMaterials = *p.PlanMaterials
 	}
 	includeSessions := true
 	if p.PlanIncludeSessions != nil {
@@ -947,11 +947,11 @@ func (s *Service) applyStudyPlanItem(ctx context.Context, q store.Q, userID uuid
 		return rejectExamItem(ctx, q, userID, item)
 	}
 	estimated, actual, order := 30, 0, 0
-	if p.PlanItemEstimatedMinutes != nil {
-		estimated = *p.PlanItemEstimatedMinutes
+	if p.PlanItemEstMins != nil {
+		estimated = *p.PlanItemEstMins
 	}
-	if p.PlanItemActualMinutes != nil {
-		actual = *p.PlanItemActualMinutes
+	if p.PlanItemActual != nil {
+		actual = *p.PlanItemActual
 	}
 	if p.PlanItemOrder != nil {
 		order = *p.PlanItemOrder
@@ -960,9 +960,9 @@ func (s *Service) applyStudyPlanItem(ctx context.Context, q store.Q, userID uuid
 	if p.PlanItemUserNote != nil {
 		userNote = *p.PlanItemUserNote
 	}
-	userEdited := p.PlanItemUserEdited != nil && *p.PlanItemUserEdited
+	userEdited := p.PlanItemUserEdit != nil && *p.PlanItemUserEdit
 	examID := refOrNil(p.ExamId)
-	statusChangedAt := p.PlanItemStatusChangedAt
+	statusChangedAt := p.PlanItemStatusAt
 
 	if obj == nil {
 		var updatedAt time.Time

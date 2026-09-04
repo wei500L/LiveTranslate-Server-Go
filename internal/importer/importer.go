@@ -195,9 +195,10 @@ func checkSourceShape(ctx context.Context, src *sql.DB, report *Report) error {
 			report.TableCounts[t] = 0
 			continue
 		}
-		if err := src.QueryRowContext(ctx, "SELECT count(*) FROM "+t).Scan(&report.TableCounts[t]); err != nil {
+		if err := src.QueryRowContext(ctx, "SELECT count(*) FROM "+t).Scan(&n); err != nil {
 			return fmt.Errorf("count table %s: %w", t, err)
 		}
+		report.TableCounts[t] = n
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("source is missing expected tables: %s (is this a LiveTranslate Python database?)",

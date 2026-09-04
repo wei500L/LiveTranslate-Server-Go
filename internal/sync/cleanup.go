@@ -199,7 +199,6 @@ func (s *Service) gcTombstonedMaterials(ctx context.Context, cutoff time.Time) (
 //     full year and an explicit 0 opts out of pruning).
 func (s *Service) RunMaintenanceCleanup(ctx context.Context) error {
 	q := s.db.Q()
-	pruned := int64(0)
 
 	type job struct {
 		name string

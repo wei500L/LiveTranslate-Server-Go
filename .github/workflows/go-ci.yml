@@ -98,10 +98,11 @@ jobs:
           # The server's migrate subcommand applies the embedded chain via goose.
           go build -o /tmp/livetranslate-server ./cmd/livetranslate-server
           DATABASE_URL="$MIGRATE_DB" JWT_SECRET=ci-secret /tmp/livetranslate-server migrate
-          # Version must be the latest migration number.
+          # Version must be the latest migration number (goose stores the
+          # integer; filenames are zero-padded).
           version=$(psql -h localhost -U ci -d livetranslate_migrate -tAc 'SELECT max(version_id) FROM goose_db_version;')
           echo "goose version: $version"
-          latest=$(ls db/migrations/*.sql | sed 's/.*\///;s/_.*//' | sort -n | tail -1)
+          latest=$((10#$(ls db/migrations/*.sql | sed 's/.*\///;s/_.*//' | sort -n | tail -1)))
           [ "$version" = "$latest" ] || { echo "expected migration version $latest, got $version"; exit 1; }
 
       - name: Migration down/up cycle (latest migration, fresh database)
@@ -158,10 +159,14 @@ jobs:
           done
           docker exec ci-postgres pg_isready -U ci
           # Server on 127.0.0.1:18000 only (loopback, not published).
+          # LISTEN_ADDR must be 0.0.0.0 inside the container: a process
+          # bound to the container's own loopback is unreachable through
+          # the published port.
           docker run -d --name ci-server --network ci-net \
             -e DATABASE_URL=postgres://ci:ci@ci-postgres:5432/livetranslate \
             -e JWT_SECRET=ci-secret-smoke \
             -e DEV_MODE=true \
+            -e LISTEN_ADDR=0.0.0.0:8000 \
             -p 127.0.0.1:18000:8000 \
             livetranslate-ci:latest
           ready=0

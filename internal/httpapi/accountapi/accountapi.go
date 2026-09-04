@@ -86,9 +86,11 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// purgeAttachmentFiles best-effort removes the user's attachment files
-// after the metadata rows are already gone. A failure is logged, not
-// surfaced — the rows no longer reference the files either way.
+// purgeAttachmentFiles best-effort removes the user's attachment AND
+// course-material files after the metadata rows are already gone (both
+// live under the same per-user storage subtree, so one sweep covers
+// both). A failure is logged, not surfaced — the rows no longer
+// reference the files either way.
 func (h *Handler) purgeAttachmentFiles(r *http.Request, userID uuid.UUID) {
 	if h.attachments == nil {
 		return

@@ -21,6 +21,7 @@ import (
 	accountapi "livetranslate/server/internal/httpapi/accountapi"
 	attachmentapi "livetranslate/server/internal/httpapi/attachmentapi"
 	authapi "livetranslate/server/internal/httpapi/auth"
+	materialapi "livetranslate/server/internal/httpapi/materialapi"
 	"livetranslate/server/internal/httpapi/middleware"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
 	"livetranslate/server/internal/mail"
@@ -130,6 +131,13 @@ func runServe() error {
 		attachmentH := attachmentapi.NewHandler(st, authH, attachmentStore)
 		attachmentH.SetMaxUploadBytes(cfg.AttachmentMaxUploadBytes)
 		attachmentH.Register(mux)
+		// Course-material files ride the SAME storage backend and user
+		// directory tree (paths keyed by entity UUID — no collision with
+		// attachments, no second user-directory scheme). PDFs run larger
+		// than classroom images, so the byte cap is raised.
+		materialH := materialapi.NewHandler(st, authH, attachmentStore)
+		materialH.SetMaxUploadBytes(cfg.MaterialMaxUploadBytes)
+		materialH.Register(mux)
 	}
 	accountH := accountapi.NewHandler(st, authH, authSvc)
 	if attachmentStore != nil {

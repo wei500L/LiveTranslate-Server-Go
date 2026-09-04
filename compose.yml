@@ -58,10 +58,13 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-LiveTranslate}
       SMTP_TLS_MODE: ${SMTP_TLS_MODE:-starttls}
       METRICS_ENABLED: ${METRICS_ENABLED:-false}
-      # Classroom image attachments (optional — empty = metadata-only sync,
-      # clients keep the files local). Point at a named volume or a bind
-      # mount you back up; NOT /tmp.
+      # Classroom image attachments AND course-material files (optional —
+      # empty = metadata-only sync, clients keep the files local). Point at
+      # a named volume or a bind mount you back up; NOT /tmp. Materials
+      # share the same store (per-user subdirectories); PDF 讲义 can be far
+      # bigger than photos, so their single-upload cap is higher.
       ATTACHMENT_STORAGE_DIR: ${ATTACHMENT_STORAGE_DIR:-/var/lib/livetranslate/attachments}
+      MATERIAL_STORAGE_MAX_UPLOAD_BYTES: ${MATERIAL_STORAGE_MAX_UPLOAD_BYTES:-209715200}
     volumes:
       - attachmentdata:/var/lib/livetranslate/attachments
     ports:

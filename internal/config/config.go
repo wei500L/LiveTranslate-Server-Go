@@ -75,6 +75,9 @@ type Config struct {
 	// local-only and the UI reports the images as not uploaded).
 	AttachmentStorageDir     string
 	AttachmentMaxUploadBytes int64
+	// Course-material files share the attachment storage dir but allow a
+	// larger single upload (PDF 讲义 can be far bigger than photos).
+	MaterialMaxUploadBytes int64
 
 	// Retention for maintenance cleanup (days; 0 = keep forever).
 	LoginEventsRetentionDays int
@@ -193,6 +196,7 @@ func Load() (*Config, error) {
 
 		AttachmentStorageDir:     env("ATTACHMENT_STORAGE_DIR", ""),
 		AttachmentMaxUploadBytes: int64(envInt("ATTACHMENT_STORAGE_MAX_UPLOAD_BYTES", 40*1024*1024)),
+		MaterialMaxUploadBytes:   int64(envInt("MATERIAL_STORAGE_MAX_UPLOAD_BYTES", 200*1024*1024)),
 
 		LoginEventsRetentionDays: envInt("LOGIN_EVENTS_RETENTION_DAYS", 90),
 		AuditRetentionDays:       envInt("AUDIT_RETENTION_DAYS", 365),

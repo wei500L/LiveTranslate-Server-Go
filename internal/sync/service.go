@@ -515,38 +515,41 @@ type AttachmentMeta struct {
 // --- Learning entities: term / study_card / study_task ----------------------------
 
 type termRow struct {
-	id            uuid.UUID
-	userID        uuid.UUID
-	courseID      *uuid.UUID
-	sessionID     *uuid.UUID
-	sourceReview  *uuid.UUID
-	sourceEntry   *uuid.UUID
-	sourceAttach  *uuid.UUID
-	sourceSessIDs string
-	russian       string
-	chinese       string
-	explanation   string
-	partOfSpeech  string
-	userNote      string
-	favorite      bool
-	status        string
-	serverVer     int
-	createdAt     time.Time
-	updatedAt     time.Time
-	deletedAt     *time.Time
+	id                 uuid.UUID
+	userID             uuid.UUID
+	courseID           *uuid.UUID
+	sessionID          *uuid.UUID
+	sourceReview       *uuid.UUID
+	sourceEntry        *uuid.UUID
+	sourceAttach       *uuid.UUID
+	sourceMaterial     *uuid.UUID
+	sourceMaterialPage int
+	sourceSessIDs      string
+	russian            string
+	chinese            string
+	explanation        string
+	partOfSpeech       string
+	userNote           string
+	favorite           bool
+	status             string
+	serverVer          int
+	createdAt          time.Time
+	updatedAt          time.Time
+	deletedAt          *time.Time
 }
 
 func fetchTerm(ctx context.Context, q store.Q, userID, id uuid.UUID) (*termRow, error) {
 	t := &termRow{}
 	err := q.QueryRow(ctx, `
 		SELECT id, user_id, course_id, session_id, source_review_id,
-		       source_entry_id, source_attachment_id, source_session_ids,
+		       source_entry_id, source_attachment_id,
+		       source_material_id, source_material_page, source_session_ids,
 		       russian, chinese, explanation, part_of_speech, user_note,
 		       is_favorite, status,
 		       server_version, created_at, updated_at, deleted_at
 		FROM glossary_terms WHERE id = $1 AND user_id = $2`, id, userID,
 	).Scan(&t.id, &t.userID, &t.courseID, &t.sessionID, &t.sourceReview,
-		&t.sourceEntry, &t.sourceAttach, &t.sourceSessIDs,
+		&t.sourceEntry, &t.sourceAttach, &t.sourceMaterial, &t.sourceMaterialPage, &t.sourceSessIDs,
 		&t.russian, &t.chinese, &t.explanation, &t.partOfSpeech, &t.userNote,
 		&t.favorite, &t.status,
 		&t.serverVer, &t.createdAt, &t.updatedAt, &t.deletedAt)
@@ -561,10 +564,12 @@ func fetchTerm(ctx context.Context, q store.Q, userID, id uuid.UUID) (*termRow, 
 
 func termRecordJSON(t *termRow) json.RawMessage {
 	courseID, sessionID, review, entry, attach := optUUIDString(t.courseID), optUUIDString(t.sessionID), optUUIDString(t.sourceReview), optUUIDString(t.sourceEntry), optUUIDString(t.sourceAttach)
+	material, materialPage := optUUIDString(t.sourceMaterial), t.sourceMaterialPage
 	b, _ := json.Marshal(termRecord{
 		EntityType: EntityTerm, ID: t.id.String(),
 		CourseID: courseID, SessionID: sessionID,
 		SourceReview: review, SourceEntry: entry, SourceAttach: attach,
+		SourceMaterial: material, SourceMaterialPage: materialPage,
 		SourceSessIDs: t.sourceSessIDs,
 		Russian:       t.russian, Chinese: t.chinese, Explanation: t.explanation,
 		PartOfSpeech: t.partOfSpeech, UserNote: t.userNote,
@@ -575,28 +580,30 @@ func termRecordJSON(t *termRow) json.RawMessage {
 }
 
 type studyCardRow struct {
-	id            uuid.UUID
-	userID        uuid.UUID
-	courseID      *uuid.UUID
-	sessionID     *uuid.UUID
-	sourceEntry   *uuid.UUID
-	sourceAttach  *uuid.UUID
-	sourceTerm    *uuid.UUID
-	front         string
-	back          string
-	cardType      string
-	userNote      string
-	origin        string
-	stage         string
-	reviewCount   int
-	intervalHours int
-	dueAt         *time.Time
-	lastReviewed  *time.Time
-	lastGrade     string
-	serverVer     int
-	createdAt     time.Time
-	updatedAt     time.Time
-	deletedAt     *time.Time
+	id                 uuid.UUID
+	userID             uuid.UUID
+	courseID           *uuid.UUID
+	sessionID          *uuid.UUID
+	sourceEntry        *uuid.UUID
+	sourceAttach       *uuid.UUID
+	sourceTerm         *uuid.UUID
+	sourceMaterial     *uuid.UUID
+	sourceMaterialPage int
+	front              string
+	back               string
+	cardType           string
+	userNote           string
+	origin             string
+	stage              string
+	reviewCount        int
+	intervalHours      int
+	dueAt              *time.Time
+	lastReviewed       *time.Time
+	lastGrade          string
+	serverVer          int
+	createdAt          time.Time
+	updatedAt          time.Time
+	deletedAt          *time.Time
 }
 
 func fetchStudyCard(ctx context.Context, q store.Q, userID, id uuid.UUID) (*studyCardRow, error) {
@@ -604,12 +611,13 @@ func fetchStudyCard(ctx context.Context, q store.Q, userID, id uuid.UUID) (*stud
 	err := q.QueryRow(ctx, `
 		SELECT id, user_id, course_id, session_id, source_entry_id,
 		       source_attachment_id, source_term_id,
+		       source_material_id, source_material_page,
 		       front, back, card_type, user_note, origin,
 		       stage, review_count, interval_hours, due_at, last_reviewed_at, last_grade,
 		       server_version, created_at, updated_at, deleted_at
 		FROM study_cards WHERE id = $1 AND user_id = $2`, id, userID,
 	).Scan(&c.id, &c.userID, &c.courseID, &c.sessionID, &c.sourceEntry,
-		&c.sourceAttach, &c.sourceTerm,
+		&c.sourceAttach, &c.sourceTerm, &c.sourceMaterial, &c.sourceMaterialPage,
 		&c.front, &c.back, &c.cardType, &c.userNote, &c.origin,
 		&c.stage, &c.reviewCount, &c.intervalHours, &c.dueAt, &c.lastReviewed, &c.lastGrade,
 		&c.serverVer, &c.createdAt, &c.updatedAt, &c.deletedAt)
@@ -624,10 +632,12 @@ func fetchStudyCard(ctx context.Context, q store.Q, userID, id uuid.UUID) (*stud
 
 func studyCardRecordJSON(c *studyCardRow) json.RawMessage {
 	courseID, sessionID, entry, attach, term := optUUIDString(c.courseID), optUUIDString(c.sessionID), optUUIDString(c.sourceEntry), optUUIDString(c.sourceAttach), optUUIDString(c.sourceTerm)
+	material, materialPage := optUUIDString(c.sourceMaterial), c.sourceMaterialPage
 	b, _ := json.Marshal(studyCardRecord{
 		EntityType: EntityStudyCard, ID: c.id.String(),
 		CourseID: courseID, SessionID: sessionID,
 		SourceEntry: entry, SourceAttach: attach, SourceTerm: term,
+		SourceMaterial: material, SourceMaterialPage: materialPage,
 		Front: c.front, Back: c.back, CardType: c.cardType, UserNote: c.userNote,
 		Origin: c.origin, Stage: c.stage,
 		ReviewCount: c.reviewCount, IntervalHrs: c.intervalHours,
@@ -638,26 +648,28 @@ func studyCardRecordJSON(c *studyCardRow) json.RawMessage {
 }
 
 type studyTaskRow struct {
-	id           uuid.UUID
-	userID       uuid.UUID
-	courseID     *uuid.UUID
-	sessionID    *uuid.UUID
-	sourceReview *uuid.UUID
-	sourceEntry  *uuid.UUID
-	sourceAttach *uuid.UUID
-	title        string
-	detail       string
-	dueAt        *time.Time
-	priority     string
-	status       string
-	origin       string
-	uncertainty  string
-	userNote     string
-	completedAt  *time.Time
-	serverVer    int
-	createdAt    time.Time
-	updatedAt    time.Time
-	deletedAt    *time.Time
+	id                 uuid.UUID
+	userID             uuid.UUID
+	courseID           *uuid.UUID
+	sessionID          *uuid.UUID
+	sourceReview       *uuid.UUID
+	sourceEntry        *uuid.UUID
+	sourceAttach       *uuid.UUID
+	sourceMaterial     *uuid.UUID
+	sourceMaterialPage int
+	title              string
+	detail             string
+	dueAt              *time.Time
+	priority           string
+	status             string
+	origin             string
+	uncertainty        string
+	userNote           string
+	completedAt        *time.Time
+	serverVer          int
+	createdAt          time.Time
+	updatedAt          time.Time
+	deletedAt          *time.Time
 }
 
 func fetchStudyTask(ctx context.Context, q store.Q, userID, id uuid.UUID) (*studyTaskRow, error) {
@@ -665,12 +677,13 @@ func fetchStudyTask(ctx context.Context, q store.Q, userID, id uuid.UUID) (*stud
 	err := q.QueryRow(ctx, `
 		SELECT id, user_id, course_id, session_id, source_review_id,
 		       source_entry_id, source_attachment_id,
+		       source_material_id, source_material_page,
 		       title, detail, due_at, priority, status, origin,
 		       uncertainty, user_note, completed_at,
 		       server_version, created_at, updated_at, deleted_at
 		FROM study_tasks WHERE id = $1 AND user_id = $2`, id, userID,
 	).Scan(&t.id, &t.userID, &t.courseID, &t.sessionID, &t.sourceReview,
-		&t.sourceEntry, &t.sourceAttach,
+		&t.sourceEntry, &t.sourceAttach, &t.sourceMaterial, &t.sourceMaterialPage,
 		&t.title, &t.detail, &t.dueAt, &t.priority, &t.status, &t.origin,
 		&t.uncertainty, &t.userNote, &t.completedAt,
 		&t.serverVer, &t.createdAt, &t.updatedAt, &t.deletedAt)
@@ -685,10 +698,12 @@ func fetchStudyTask(ctx context.Context, q store.Q, userID, id uuid.UUID) (*stud
 
 func studyTaskRecordJSON(t *studyTaskRow) json.RawMessage {
 	courseID, sessionID, review, entry, attach := optUUIDString(t.courseID), optUUIDString(t.sessionID), optUUIDString(t.sourceReview), optUUIDString(t.sourceEntry), optUUIDString(t.sourceAttach)
+	material, materialPage := optUUIDString(t.sourceMaterial), t.sourceMaterialPage
 	b, _ := json.Marshal(studyTaskRecord{
 		EntityType: EntityStudyTask, ID: t.id.String(), Title: t.title,
 		CourseID: courseID, SessionID: sessionID,
 		SourceReview: review, SourceEntry: entry, SourceAttach: attach,
+		SourceMaterial: material, SourceMaterialPage: materialPage,
 		Detail: t.detail, DueAt: t.dueAt, Priority: t.priority, Status: t.status,
 		Origin: t.origin, Uncertainty: t.uncertainty, UserNote: t.userNote,
 		CompletedAt:   t.completedAt,
@@ -1060,6 +1075,16 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyCourseSchedule(ctx, q, userID, item)
 	case EntityScheduleException:
 		return s.applyScheduleException(ctx, q, userID, item)
+	case EntityMaterial:
+		return s.applyMaterial(ctx, q, userID, item)
+	case EntityMaterialPage:
+		return s.applyMaterialPage(ctx, q, userID, item)
+	case EntityMaterialAnnotation:
+		return s.applyMaterialAnnotation(ctx, q, userID, item)
+	case EntityAssistantThread:
+		return s.applyAssistantThread(ctx, q, userID, item)
+	case EntityAssistantMessage:
+		return s.applyAssistantMessage(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -1443,6 +1468,36 @@ func (s *Service) cascadeDeleteChildren(ctx context.Context, q store.Q, userID, 
 	}
 	for _, b := range corrections {
 		if err := logChange(ctx, q, userID, EntityTranscriptCorrection, b.id, "delete", b.v); err != nil {
+			return err
+		}
+	}
+
+	// Materials are course data, NOT session data: deleting the class only
+	// UNLINKS them (session_id cleared; the rows stay alive under their
+	// course — the iOS mirror of this rule clears the local reference).
+	rows, err = q.Query(ctx, `
+		UPDATE course_materials
+		SET session_id = NULL, server_version = server_version + 1, updated_at = now()
+		WHERE user_id = $1 AND session_id = $2 AND deleted_at IS NULL
+		RETURNING id, server_version`, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	var unlinkedMaterials []bumped
+	for rows.Next() {
+		b := bumped{}
+		if err := rows.Scan(&b.id, &b.v); err != nil {
+			rows.Close()
+			return err
+		}
+		unlinkedMaterials = append(unlinkedMaterials, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range unlinkedMaterials {
+		if err := logChange(ctx, q, userID, EntityMaterial, b.id, "upsert", b.v); err != nil {
 			return err
 		}
 	}
@@ -2197,6 +2252,15 @@ func (s *Service) applyCourse(ctx context.Context, q store.Q, userID uuid.UUID, 
 		// Learning material survives too — terms/cards/tasks keep their
 		// rows and schedule, only the course scoping reference is cleared.
 		if err := s.detachCourseFromStudyData(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
+		// Course materials survive as 未归类 (转入未归类): only the course
+		// reference is cleared — the material rows, files and digests stay.
+		// Assistant threads detach the same way.
+		if err := s.detachCourseFromMaterials(ctx, q, userID, item.EntityID); err != nil {
+			return nil, err
+		}
+		if err := s.detachCourseFromAssistantThreads(ctx, q, userID, item.EntityID); err != nil {
 			return nil, err
 		}
 		// Schedules, however, are meaningless without their course — they
@@ -3136,19 +3200,27 @@ func (s *Service) applyTerm(ctx context.Context, q store.Q, userID uuid.UUID, it
 		reviewID := refOrNil(p.SourceReviewID)
 		entryID := refOrNil(p.EntryID)
 		attachID := refOrNil(p.SourceAttachmentID)
+		materialID := refOrNil(p.MaterialID)
+		materialPage := 0
+		if p.MaterialPageNumber != nil {
+			materialPage = *p.MaterialPageNumber
+		}
 		var updatedAt time.Time
 		err := q.QueryRow(ctx, `
 			INSERT INTO glossary_terms
 				(id, user_id, course_id, session_id, source_review_id,
-				 source_entry_id, source_attachment_id, source_session_ids,
+				 source_entry_id, source_attachment_id,
+				 source_material_id, source_material_page, source_session_ids,
 				 russian, chinese, explanation, part_of_speech, user_note,
 				 is_favorite, status,
 				 server_version, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-			        $9, $10, $11, $12, $13, $14, $15,
+			        $9, $10, $11,
+			        $12, $13, $14, $15, $16, $17, $18,
 			        1, now(), now())
 			RETURNING updated_at`,
-			item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID, sourceSessions,
+			item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+			materialID, materialPage, sourceSessions,
 			*p.TermRussian, chinese, explanation, pos, note, favorite, status,
 		).Scan(&updatedAt)
 		if err != nil {
@@ -3223,18 +3295,25 @@ func (s *Service) applyTerm(ctx context.Context, q store.Q, userID uuid.UUID, it
 	reviewID := mergeRef(obj.sourceReview, p.SourceReviewID)
 	entryID := mergeRef(obj.sourceEntry, p.EntryID)
 	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
+	materialID := mergeRef(obj.sourceMaterial, p.MaterialID)
+	materialPage := obj.sourceMaterialPage
+	if p.MaterialPageNumber != nil {
+		materialPage = *p.MaterialPageNumber
+	}
 	var version int
 	var updatedAt time.Time
 	err = q.QueryRow(ctx, `
 		UPDATE glossary_terms
 		SET course_id = $3, session_id = $4, source_review_id = $5,
-		    source_entry_id = $6, source_attachment_id = $7, source_session_ids = $8,
-		    russian = $9, chinese = $10, explanation = $11, part_of_speech = $12,
-		    user_note = $13, is_favorite = $14, status = $15,
+		    source_entry_id = $6, source_attachment_id = $7,
+		    source_material_id = $8, source_material_page = $9, source_session_ids = $10,
+		    russian = $11, chinese = $12, explanation = $13, part_of_speech = $14,
+		    user_note = $15, is_favorite = $16, status = $17,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
-		item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID, sourceSessions,
+		item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+		materialID, materialPage, sourceSessions,
 		russian, chinese, explanation, pos, note, favorite, status,
 	).Scan(&version, &updatedAt)
 	if err != nil {
@@ -3318,20 +3397,28 @@ func (s *Service) applyStudyCard(ctx context.Context, q store.Q, userID uuid.UUI
 		entryID := refOrNil(p.EntryID)
 		attachID := refOrNil(p.SourceAttachmentID)
 		termID := refOrNil(p.SourceTermID)
+		materialID := refOrNil(p.MaterialID)
+		materialPage := 0
+		if p.MaterialPageNumber != nil {
+			materialPage = *p.MaterialPageNumber
+		}
 		var updatedAt time.Time
 		err := q.QueryRow(ctx, `
 			INSERT INTO study_cards
 				(id, user_id, course_id, session_id, source_entry_id,
 				 source_attachment_id, source_term_id,
+				 source_material_id, source_material_page,
 				 front, back, card_type, user_note, origin,
 				 stage, review_count, interval_hours, due_at, last_reviewed_at, last_grade,
 				 server_version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7,
-			        $8, $9, $10, $11, $12,
-			        $13, $14, $15, $16, $17, $18,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+			        $9, $10,
+			        $11, $12, $13, $14, $15,
+			        $16, $17, $18, $19, $20, $21,
 			        1, now(), now())
 			RETURNING updated_at`,
 			item.EntityID, userID, courseID, sessionID, entryID, attachID, termID,
+			materialID, materialPage,
 			*p.CardFront, back, cardType, note, origin,
 			stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade,
 		).Scan(&updatedAt)
@@ -3390,6 +3477,11 @@ func (s *Service) applyStudyCard(ctx context.Context, q store.Q, userID uuid.UUI
 	entryID := mergeRef(obj.sourceEntry, p.EntryID)
 	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
 	termID := mergeRef(obj.sourceTerm, p.SourceTermID)
+	materialID := mergeRef(obj.sourceMaterial, p.MaterialID)
+	materialPage := obj.sourceMaterialPage
+	if p.MaterialPageNumber != nil {
+		materialPage = *p.MaterialPageNumber
+	}
 
 	// Review-state merge: newer lastReviewedAt wins wholesale.
 	stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade :=
@@ -3421,13 +3513,15 @@ func (s *Service) applyStudyCard(ctx context.Context, q store.Q, userID uuid.UUI
 		UPDATE study_cards
 		SET course_id = $3, session_id = $4, source_entry_id = $5,
 		    source_attachment_id = $6, source_term_id = $7,
-		    front = $8, back = $9, card_type = $10, user_note = $11,
-		    stage = $12, review_count = $13, interval_hours = $14,
-		    due_at = $15, last_reviewed_at = $16, last_grade = $17,
+		    source_material_id = $8, source_material_page = $9,
+		    front = $10, back = $11, card_type = $12, user_note = $13,
+		    stage = $14, review_count = $15, interval_hours = $16,
+		    due_at = $17, last_reviewed_at = $18, last_grade = $19,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
 		item.EntityID, userID, courseID, sessionID, entryID, attachID, termID,
+		materialID, materialPage,
 		front, back, cardType, note,
 		stage, reviewCount, intervalHours, dueAt, lastReviewed, lastGrade,
 	).Scan(&version, &updatedAt)
@@ -3507,20 +3601,28 @@ func (s *Service) applyStudyTask(ctx context.Context, q store.Q, userID uuid.UUI
 		reviewID := refOrNil(p.SourceReviewID)
 		entryID := refOrNil(p.EntryID)
 		attachID := refOrNil(p.SourceAttachmentID)
+		materialID := refOrNil(p.MaterialID)
+		materialPage := 0
+		if p.MaterialPageNumber != nil {
+			materialPage = *p.MaterialPageNumber
+		}
 		var updatedAt time.Time
 		err := q.QueryRow(ctx, `
 			INSERT INTO study_tasks
 				(id, user_id, course_id, session_id, source_review_id,
 				 source_entry_id, source_attachment_id,
+				 source_material_id, source_material_page,
 				 title, detail, due_at, priority, status, origin,
 				 uncertainty, user_note, completed_at,
 				 server_version, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7,
-			        $8, $9, $10, $11, $12, $13,
-			        $14, $15, $16,
+			        $8, $9, $10,
+			        $11, $12, $13, $14, $15, $16,
+			        $17, $18, $19,
 			        1, now(), now())
 			RETURNING updated_at`,
 			item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+			materialID, materialPage,
 			title, detail, dueAt, priority, status, origin,
 			uncertainty, note, completedAt,
 		).Scan(&updatedAt)
@@ -3587,6 +3689,11 @@ func (s *Service) applyStudyTask(ctx context.Context, q store.Q, userID uuid.UUI
 	reviewID := mergeRef(obj.sourceReview, p.SourceReviewID)
 	entryID := mergeRef(obj.sourceEntry, p.EntryID)
 	attachID := mergeRef(obj.sourceAttach, p.SourceAttachmentID)
+	materialID := mergeRef(obj.sourceMaterial, p.MaterialID)
+	materialPage := obj.sourceMaterialPage
+	if p.MaterialPageNumber != nil {
+		materialPage = *p.MaterialPageNumber
+	}
 
 	// Status merge with sticky-done.
 	status := obj.status
@@ -3617,13 +3724,15 @@ func (s *Service) applyStudyTask(ctx context.Context, q store.Q, userID uuid.UUI
 		UPDATE study_tasks
 		SET course_id = $3, session_id = $4, source_review_id = $5,
 		    source_entry_id = $6, source_attachment_id = $7,
-		    title = $8, detail = $9, due_at = $10, priority = $11,
-		    status = $12, origin = $13, uncertainty = $14, user_note = $15,
-		    completed_at = $16,
+		    source_material_id = $8, source_material_page = $9,
+		    title = $10, detail = $11, due_at = $12, priority = $13,
+		    status = $14, origin = $15, uncertainty = $16, user_note = $17,
+		    completed_at = $18,
 		    server_version = server_version + 1, updated_at = now()
 		WHERE id = $1 AND user_id = $2
 		RETURNING server_version, updated_at`,
 		item.EntityID, userID, courseID, sessionID, reviewID, entryID, attachID,
+		materialID, materialPage,
 		title, detail, dueAt, priority, status, origin, uncertainty, note,
 		completedAt,
 	).Scan(&version, &updatedAt)
@@ -4420,6 +4529,36 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return scheduleExceptionRecordJSON(obj), nil
+	case EntityMaterial:
+		obj, err := fetchMaterial(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return materialRecordJSON(obj), nil
+	case EntityMaterialPage:
+		obj, err := fetchMaterialPage(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return materialPageRecordJSON(obj), nil
+	case EntityMaterialAnnotation:
+		obj, err := fetchMaterialAnnotation(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return materialAnnotationRecordJSON(obj), nil
+	case EntityAssistantThread:
+		obj, err := fetchAssistantThread(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return assistantThreadRecordJSON(obj), nil
+	case EntityAssistantMessage:
+		obj, err := fetchAssistantMessage(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return assistantMessageRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -4429,6 +4568,7 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResponse, error) {
 	q := s.db.Q()
 	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections, schedules, exceptions int
+	var materials, materialPages, materialAnnotations, assistantThreads, assistantMessages int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -4443,8 +4583,14 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM study_tasks WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM transcript_corrections WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM course_schedules WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM schedule_exceptions WHERE user_id = $1 AND deleted_at IS NULL)`,
-		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions)
+			(SELECT count(*) FROM schedule_exceptions WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM course_materials WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM material_pages WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM material_annotations WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM assistant_threads WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM assistant_messages WHERE user_id = $1 AND deleted_at IS NULL)`,
+		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions,
+		&materials, &materialPages, &materialAnnotations, &assistantThreads, &assistantMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -4465,6 +4611,11 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		TranscriptCorrectionCount: corrections,
 		CourseScheduleCount:       schedules,
 		ScheduleExceptionCount:    exceptions,
+		MaterialCount:             materials,
+		MaterialPageCount:         materialPages,
+		MaterialAnnotationCount:   materialAnnotations,
+		AssistantThreadCount:      assistantThreads,
+		AssistantMessageCount:     assistantMessages,
 		PendingCount:              0,
 		ServerTime:                time.Now(),
 	}, nil

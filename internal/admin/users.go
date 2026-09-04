@@ -36,11 +36,17 @@ type DashboardStats struct {
 	// Pre-class layer: recurring schedules and dated exceptions.
 	CourseSchedules    int
 	ScheduleExceptions int
-	RecentSyncAt       *time.Time
-	MailSent           int64 // from the in-process metrics counters
-	MailFailed         int64
-	APIErrors          int64
-	HTTPRequests       int64
+	// Course-material library: imported documents and the assistant's
+	// conversation threads.
+	CourseMaterials   int
+	MaterialPages     int
+	AssistantThreads  int
+	AssistantMessages int
+	RecentSyncAt      *time.Time
+	MailSent          int64 // from the in-process metrics counters
+	MailFailed        int64
+	APIErrors         int64
+	HTTPRequests      int64
 	// RegistrationTrend is per-day counts for the last 7 days, oldest first.
 	RegistrationTrend []TrendPoint
 	RegistrationMode  string
@@ -72,12 +78,18 @@ func LoadDashboardStats(ctx context.Context, q store.Q) (*DashboardStats, error)
 			(SELECT count(*) FROM transcript_corrections WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM course_schedules WHERE deleted_at IS NULL),
 			(SELECT count(*) FROM schedule_exceptions WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM course_materials WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM material_pages WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM assistant_threads WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM assistant_messages WHERE deleted_at IS NULL),
 			(SELECT max(created_at) FROM sync_changes)
 	`).Scan(&d.UsersTotal, &d.UsersActive, &d.UsersPending, &d.UsersSuspended,
 		&d.UsersUnverified, &d.RegisteredToday, &d.DeviceRows, &d.LiveSessions,
 		&d.ClassroomSessions, &d.TranscriptEntries, &d.StudyReviews,
 		&d.GlossaryTerms, &d.StudyCards, &d.StudyTasks,
-		&d.TranscriptCorrections, &d.CourseSchedules, &d.ScheduleExceptions, &d.RecentSyncAt)
+		&d.TranscriptCorrections, &d.CourseSchedules, &d.ScheduleExceptions,
+		&d.CourseMaterials, &d.MaterialPages, &d.AssistantThreads, &d.AssistantMessages,
+		&d.RecentSyncAt)
 	if err != nil {
 		return nil, err
 	}

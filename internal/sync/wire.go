@@ -213,6 +213,49 @@ type PushPayload struct {
 	ScheduleChangedStart  *int    `json:"scheduleChangedStart"`
 	ScheduleChangedEnd    *int    `json:"scheduleChangedEnd"`
 	ScheduleMovedToDate   *string `json:"scheduleMovedToDate"`
+	// Course material (teacher handout / problem set / document). Title
+	// rides the shared Title; the course/session references ride the shared
+	// CourseID/SessionID sentinel fields; the occurrence link reuses
+	// ScheduleOccurrenceKey (an opaque grouping string server-side, same as
+	// sessions); a material borrowed from a classroom image references it
+	// via SourceAttachmentID. The digest (导读) rides as a JSON STRING in
+	// MaterialDigest (the analysis/reviewContent convention). The ORIGINAL
+	// FILE never rides push — it travels on /v1/materials/<id>/file.
+	MaterialKind          *string    `json:"materialKind"`
+	MaterialMime          *string    `json:"materialMime"`
+	MaterialFileName      *string    `json:"materialFileName"`
+	MaterialFormat        *string    `json:"materialFormat"`
+	MaterialFileSize      *int64     `json:"materialFileSize"`
+	MaterialHash          *string    `json:"materialHash"`
+	MaterialPageCount     *int       `json:"materialPageCount"`
+	MaterialExtraction    *string    `json:"materialExtraction"`
+	MaterialDigestStatus  *string    `json:"materialDigestStatus"`
+	MaterialDigest        *string    `json:"materialDigest"`
+	MaterialDigestModel   *string    `json:"materialDigestModel"`
+	MaterialDigestAt      *time.Time `json:"materialDigestAt"`
+	MaterialDigestSrcHash *string    `json:"materialDigestSourceHash"`
+	MaterialLastReadPage  *int       `json:"materialLastReadPage"`
+	MaterialLastOpenedAt  *time.Time `json:"materialLastOpenedAt"`
+	// Shared material reference: the parent material of a page/annotation/
+	// assistant-message scope. Absent (nil) keeps the stored value;
+	// uuid.Nil explicitly CLEARS it.
+	MaterialID *uuid.UUID `json:"materialId"`
+	// Material page: 1-based page number; the extraction layer and the OCR
+	// layer ride separate fields (never merged server-side).
+	MaterialPageNumber   *int    `json:"materialPageNumber"`
+	MaterialPageText     *string `json:"materialPageText"`
+	MaterialPageOCR      *string `json:"materialPageOCR"`
+	MaterialPageOCRState *string `json:"materialPageOCRStatus"`
+	// Material annotation: kind (note|bookmark); the note body rides the
+	// shared NoteText; the page rides the shared MaterialPageNumber.
+	MaterialAnnotationKind *string `json:"materialAnnotationKind"`
+	// Course assistant: thread parent (required for messages); a message's
+	// question scope rides the shared MaterialID/SessionID/MaterialPageNumber;
+	// citations ride as a JSON STRING in AssistantCitations.
+	ThreadID           *uuid.UUID `json:"threadId"`
+	AssistantRole      *string    `json:"assistantRole"`
+	AssistantText      *string    `json:"assistantText"`
+	AssistantCitations *string    `json:"assistantCitations"`
 }
 
 type PushItem struct {
@@ -281,6 +324,11 @@ type SyncStatusResponse struct {
 	TranscriptCorrectionCount int       `json:"transcriptCorrectionCount"`
 	CourseScheduleCount       int       `json:"courseScheduleCount"`
 	ScheduleExceptionCount    int       `json:"scheduleExceptionCount"`
+	MaterialCount             int       `json:"materialCount"`
+	MaterialPageCount         int       `json:"materialPageCount"`
+	MaterialAnnotationCount   int       `json:"materialAnnotationCount"`
+	AssistantThreadCount      int       `json:"assistantThreadCount"`
+	AssistantMessageCount     int       `json:"assistantMessageCount"`
 	PendingCount              int       `json:"pendingCount"`
 	ServerTime                time.Time `json:"serverTime"`
 }
@@ -305,6 +353,13 @@ const (
 	// 15 / 17 chars — both fit the VARCHAR(32) entity_type columns.
 	EntityCourseSchedule    = "course_schedule"
 	EntityScheduleException = "schedule_exception"
+	// Course-material library: 8 / 13 / 19 / 16 / 17 chars — all fit the
+	// VARCHAR(32) entity_type columns widened by migration 00008.
+	EntityMaterial           = "material"
+	EntityMaterialPage       = "material_page"
+	EntityMaterialAnnotation = "material_annotation"
+	EntityAssistantThread    = "assistant_thread"
+	EntityAssistantMessage   = "assistant_message"
 )
 
 func validEntityType(t string) bool {
@@ -314,7 +369,10 @@ func validEntityType(t string) bool {
 		t == EntityStudyReview || t == EntityAttachment ||
 		t == EntityTerm || t == EntityStudyCard || t == EntityStudyTask ||
 		t == EntityTranscriptCorrection ||
-		t == EntityCourseSchedule || t == EntityScheduleException
+		t == EntityCourseSchedule || t == EntityScheduleException ||
+		t == EntityMaterial || t == EntityMaterialPage ||
+		t == EntityMaterialAnnotation ||
+		t == EntityAssistantThread || t == EntityAssistantMessage
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -444,12 +502,14 @@ type termRecord struct {
 	EntityType string `json:"entityType"`
 	ID         string `json:"id"`
 	// Nil omits the key (no source / unscoped), matching session/note.
-	CourseID      *string `json:"courseId,omitempty"`
-	SessionID     *string `json:"sessionId,omitempty"`
-	SourceReview  *string `json:"sourceReviewId,omitempty"`
-	SourceEntry   *string `json:"sourceEntryId,omitempty"`
-	SourceAttach  *string `json:"sourceAttachmentId,omitempty"`
-	SourceSessIDs string  `json:"termSourceSessions,omitempty"`
+	CourseID           *string `json:"courseId,omitempty"`
+	SessionID          *string `json:"sessionId,omitempty"`
+	SourceReview       *string `json:"sourceReviewId,omitempty"`
+	SourceEntry        *string `json:"sourceEntryId,omitempty"`
+	SourceAttach       *string `json:"sourceAttachmentId,omitempty"`
+	SourceMaterial     *string `json:"materialId,omitempty"`
+	SourceMaterialPage int     `json:"materialPageNumber,omitempty"`
+	SourceSessIDs      string  `json:"termSourceSessions,omitempty"`
 	// Field names mirror the push payload so iOS decodes records and
 	// conflict payloads with the same CodingKeys.
 	Russian       string `json:"termRussian"`
@@ -464,48 +524,52 @@ type termRecord struct {
 }
 
 type studyCardRecord struct {
-	EntityType    string     `json:"entityType"`
-	ID            string     `json:"id"`
-	CourseID      *string    `json:"courseId,omitempty"`
-	SessionID     *string    `json:"sessionId,omitempty"`
-	SourceEntry   *string    `json:"sourceEntryId,omitempty"`
-	SourceAttach  *string    `json:"sourceAttachmentId,omitempty"`
-	SourceTerm    *string    `json:"sourceTermId,omitempty"`
-	Front         string     `json:"cardFront"`
-	Back          string     `json:"cardBack"`
-	CardType      string     `json:"cardType"`
-	UserNote      string     `json:"cardUserNote"`
-	Origin        string     `json:"cardOrigin"`
-	Stage         string     `json:"cardStage"`
-	ReviewCount   int        `json:"cardReviewCount"`
-	IntervalHrs   int        `json:"cardIntervalHours"`
-	DueAt         *time.Time `json:"cardDueAt,omitempty"`
-	LastReviewed  *time.Time `json:"cardLastReviewedAt,omitempty"`
-	LastGrade     string     `json:"cardLastGrade"`
-	ServerVersion int        `json:"serverVersion"`
-	Deleted       bool       `json:"deleted"`
+	EntityType         string     `json:"entityType"`
+	ID                 string     `json:"id"`
+	CourseID           *string    `json:"courseId,omitempty"`
+	SessionID          *string    `json:"sessionId,omitempty"`
+	SourceEntry        *string    `json:"sourceEntryId,omitempty"`
+	SourceAttach       *string    `json:"sourceAttachmentId,omitempty"`
+	SourceTerm         *string    `json:"sourceTermId,omitempty"`
+	SourceMaterial     *string    `json:"materialId,omitempty"`
+	SourceMaterialPage int        `json:"materialPageNumber,omitempty"`
+	Front              string     `json:"cardFront"`
+	Back               string     `json:"cardBack"`
+	CardType           string     `json:"cardType"`
+	UserNote           string     `json:"cardUserNote"`
+	Origin             string     `json:"cardOrigin"`
+	Stage              string     `json:"cardStage"`
+	ReviewCount        int        `json:"cardReviewCount"`
+	IntervalHrs        int        `json:"cardIntervalHours"`
+	DueAt              *time.Time `json:"cardDueAt,omitempty"`
+	LastReviewed       *time.Time `json:"cardLastReviewedAt,omitempty"`
+	LastGrade          string     `json:"cardLastGrade"`
+	ServerVersion      int        `json:"serverVersion"`
+	Deleted            bool       `json:"deleted"`
 }
 
 type studyTaskRecord struct {
 	EntityType string `json:"entityType"`
 	ID         string `json:"id"`
 	// Title rides the shared "title" key (course/attachment convention).
-	Title         string     `json:"title"`
-	CourseID      *string    `json:"courseId,omitempty"`
-	SessionID     *string    `json:"sessionId,omitempty"`
-	SourceReview  *string    `json:"sourceReviewId,omitempty"`
-	SourceEntry   *string    `json:"sourceEntryId,omitempty"`
-	SourceAttach  *string    `json:"sourceAttachmentId,omitempty"`
-	Detail        string     `json:"taskDetail"`
-	DueAt         *time.Time `json:"taskDueAt,omitempty"`
-	Priority      string     `json:"taskPriority"`
-	Status        string     `json:"taskStatus"`
-	Origin        string     `json:"taskOrigin"`
-	Uncertainty   string     `json:"taskUncertainty"`
-	UserNote      string     `json:"taskUserNote"`
-	CompletedAt   *time.Time `json:"taskCompletedAt,omitempty"`
-	ServerVersion int        `json:"serverVersion"`
-	Deleted       bool       `json:"deleted"`
+	Title              string     `json:"title"`
+	CourseID           *string    `json:"courseId,omitempty"`
+	SessionID          *string    `json:"sessionId,omitempty"`
+	SourceReview       *string    `json:"sourceReviewId,omitempty"`
+	SourceEntry        *string    `json:"sourceEntryId,omitempty"`
+	SourceAttach       *string    `json:"sourceAttachmentId,omitempty"`
+	SourceMaterial     *string    `json:"materialId,omitempty"`
+	SourceMaterialPage int        `json:"materialPageNumber,omitempty"`
+	Detail             string     `json:"taskDetail"`
+	DueAt              *time.Time `json:"taskDueAt,omitempty"`
+	Priority           string     `json:"taskPriority"`
+	Status             string     `json:"taskStatus"`
+	Origin             string     `json:"taskOrigin"`
+	Uncertainty        string     `json:"taskUncertainty"`
+	UserNote           string     `json:"taskUserNote"`
+	CompletedAt        *time.Time `json:"taskCompletedAt,omitempty"`
+	ServerVersion      int        `json:"serverVersion"`
+	Deleted            bool       `json:"deleted"`
 }
 
 // transcriptCorrectionRecord: field names mirror the push payload (the
@@ -565,4 +629,85 @@ type scheduleExceptionRecord struct {
 	Note          string  `json:"scheduleNote"`
 	ServerVersion int     `json:"serverVersion"`
 	Deleted       bool    `json:"deleted"`
+}
+
+// courseMaterialRecord / materialPageRecord / materialAnnotationRecord /
+// assistantThreadRecord / assistantMessageRecord: field names mirror the
+// push payload (materialXxx / assistantXxx families) so iOS decodes
+// records and conflict payloads with the same CodingKeys. The digest is a
+// JSON string (see PushPayload.MaterialDigest); citations likewise.
+type courseMaterialRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	CourseID      *string `json:"courseId,omitempty"`
+	SessionID     *string `json:"sessionId,omitempty"`
+	OccurrenceKey string  `json:"scheduleOccurrenceKey,omitempty"`
+	// A material borrowed from a classroom image references it (no file of
+	// its own); nil = owns its file.
+	SourceAttach  *string    `json:"sourceAttachmentId,omitempty"`
+	Kind          string     `json:"materialKind"`
+	MimeType      string     `json:"materialMime"`
+	FileName      string     `json:"materialFileName"`
+	Format        string     `json:"materialFormat"`
+	FileSize      int64      `json:"materialFileSize"`
+	ContentHash   string     `json:"materialHash"`
+	PageCount     int        `json:"materialPageCount"`
+	Extraction    string     `json:"materialExtraction"`
+	DigestStatus  string     `json:"materialDigestStatus"`
+	Digest        *string    `json:"materialDigest,omitempty"`
+	DigestModel   string     `json:"materialDigestModel"`
+	DigestAt      *time.Time `json:"materialDigestAt,omitempty"`
+	DigestSrcHash string     `json:"materialDigestSourceHash"`
+	LastReadPage  int        `json:"materialLastReadPage"`
+	LastOpenedAt  *time.Time `json:"materialLastOpenedAt,omitempty"`
+	ServerVersion int        `json:"serverVersion"`
+	Deleted       bool       `json:"deleted"`
+}
+
+type materialPageRecord struct {
+	EntityType    string `json:"entityType"`
+	ID            string `json:"id"`
+	MaterialID    string `json:"materialId"`
+	PageNumber    int    `json:"materialPageNumber"`
+	ExtractedText string `json:"materialPageText"`
+	OcrText       string `json:"materialPageOCR"`
+	OcrStatus     string `json:"materialPageOCRStatus"`
+	ServerVersion int    `json:"serverVersion"`
+	Deleted       bool   `json:"deleted"`
+}
+
+type materialAnnotationRecord struct {
+	EntityType    string `json:"entityType"`
+	ID            string `json:"id"`
+	MaterialID    string `json:"materialId"`
+	PageNumber    int    `json:"materialPageNumber"`
+	Kind          string `json:"materialAnnotationKind"`
+	NoteText      string `json:"noteText"`
+	ServerVersion int    `json:"serverVersion"`
+	Deleted       bool   `json:"deleted"`
+}
+
+type assistantThreadRecord struct {
+	EntityType    string  `json:"entityType"`
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	CourseID      *string `json:"courseId,omitempty"`
+	ServerVersion int     `json:"serverVersion"`
+	Deleted       bool    `json:"deleted"`
+}
+
+type assistantMessageRecord struct {
+	EntityType string  `json:"entityType"`
+	ID         string  `json:"id"`
+	ThreadID   string  `json:"threadId"`
+	Role       string  `json:"assistantRole"`
+	Text       string  `json:"assistantText"`
+	Citations  *string `json:"assistantCitations,omitempty"`
+	// Question scope (absent = course-wide question).
+	ScopeMaterial   *string `json:"materialId,omitempty"`
+	ScopeSession    *string `json:"sessionId,omitempty"`
+	ScopePageNumber int     `json:"materialPageNumber,omitempty"`
+	ServerVersion   int     `json:"serverVersion"`
+	Deleted         bool    `json:"deleted"`
 }

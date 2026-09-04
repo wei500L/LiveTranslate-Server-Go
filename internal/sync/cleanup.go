@@ -25,19 +25,27 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 
 	deleted := int64(0)
 	// Tombstoned entity rows (children first to keep the deletes cheap even
-	// without FK cascades in the path). session_attachments goes first of
-	// all so its files can be reaped while the rows still exist.
+	// without FK cascades in the path). session_attachments and
+	// course_materials go first of all so their files can be reaped while
+	// the rows still exist.
 	attachmentIDs, err := s.gcTombstonedAttachments(ctx, cutoff)
 	if err != nil {
 		return err
 	}
 	deleted += int64(len(attachmentIDs))
+	materialIDs, err := s.gcTombstonedMaterials(ctx, cutoff)
+	if err != nil {
+		return err
+	}
+	deleted += int64(len(materialIDs))
 	for _, table := range []string{
 		"transcript_entries", "bookmarks", "favorite_sessions", "session_notes",
 		"study_reviews", "classroom_sessions", "courses",
 		"glossary_terms", "study_cards", "study_tasks",
 		"transcript_corrections",
 		"schedule_exceptions", "course_schedules",
+		"material_pages", "material_annotations",
+		"assistant_messages", "assistant_threads",
 	} {
 		tag, err := s.db.Q().Exec(ctx, `
 			DELETE FROM `+table+`
@@ -114,6 +122,60 @@ func (s *Service) gcTombstonedAttachments(ctx context.Context, cutoff time.Time)
 			if err := s.attachments.DeleteFiles(uid, aid); err != nil {
 				// Best-effort: a stray file is disk noise, not data loss.
 				slog.Error("attachment file gc failed", "user_id", uid, "attachment_id", aid, "err", err.Error())
+			}
+		}
+	}
+	return ids, nil
+}
+
+// gcTombstonedMaterials deletes material rows past retention and reaps
+// their files (the attachment GC pattern — rows collected first so files
+// can be removed after the row delete). Materials that borrow a
+// classroom attachment's files (source_attachment_id set) have no file of
+// their own; the storage layer's DeleteFiles on a never-written directory
+// is a cheap no-op, so no filter is needed.
+func (s *Service) gcTombstonedMaterials(ctx context.Context, cutoff time.Time) ([][2]string, error) {
+	rows, err := s.db.Q().Query(ctx, `
+		SELECT user_id::text, id::text FROM course_materials
+		WHERE deleted_at IS NOT NULL AND deleted_at < $1`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	var ids [][2]string
+	for rows.Next() {
+		var pair [2]string
+		if err := rows.Scan(&pair[0], &pair[1]); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, pair)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.Q().Exec(ctx, `
+		DELETE FROM course_materials
+		WHERE deleted_at IS NOT NULL AND deleted_at < $1`, cutoff); err != nil {
+		return nil, err
+	}
+	slog.Info("tombstone gc", "table", "course_materials", "rows", len(ids))
+	if s.attachments != nil {
+		for _, pair := range ids {
+			uid, err := uuid.Parse(pair[0])
+			if err != nil {
+				continue
+			}
+			mid, err := uuid.Parse(pair[1])
+			if err != nil {
+				continue
+			}
+			if err := s.attachments.DeleteFiles(uid, mid); err != nil {
+				// Best-effort: a stray file is disk noise, not data loss.
+				slog.Error("material file gc failed", "user_id", uid, "material_id", mid, "err", err.Error())
 			}
 		}
 	}

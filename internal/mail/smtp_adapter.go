@@ -33,7 +33,8 @@ func (d *netDialer) dialTLS(addr string, cfg *tls.Config) (netConn, error) {
 }
 
 type smtpClient struct {
-	c *smtp.Client
+	c    *smtp.Client
+	conn netConn // kept for whole-phase deadlines (smtp.Client has no exported Conn)
 }
 
 func newSMTPClient(conn netConn, host string) (*smtpClient, error) {
@@ -41,12 +42,12 @@ func newSMTPClient(conn netConn, host string) (*smtpClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &smtpClient{c: c}, nil
+	return &smtpClient{c: c, conn: conn}, nil
 }
 
 // deadline bounds the whole send phase (auth → DATA → QUIT).
 func (w *smtpClient) deadline(t time.Time) error {
-	return w.c.Conn().SetDeadline(t)
+	return w.conn.SetDeadline(t)
 }
 
 func (w *smtpClient) extStartTLS() bool {

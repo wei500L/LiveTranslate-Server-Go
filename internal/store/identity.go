@@ -245,8 +245,9 @@ func CreatePasswordResetToken(ctx context.Context, q Q, t *PasswordResetToken) e
 // page (valid | expired | used | unknown). The token itself is high-entropy
 // and single-use, so revealing its state by direct query is safe.
 type PasswordResetTokenState struct {
-	Status    string // valid | expired | used | unknown
-	ExpiresAt time.Time
+	Status     string // valid | expired | used | unknown
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
 }
 
 func LookupPasswordResetTokenState(ctx context.Context, q Q, tokenHash string) (*PasswordResetTokenState, error) {

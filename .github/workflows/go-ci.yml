@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: gofmt, vet, build, unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record environment
+        run: |
+          set -euo pipefail
+          go version
+          docker --version || true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt check
+        run: |
+          set -euo pipefail
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then
+            echo "Files not gofmt-clean:"; echo "$bad"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build commands
+        run: go build ./...
+
+      - name: Unit tests (no database)
+        run: go test ./internal/...
+
+  integration:
+    name: PostgreSQL 16 migrations + integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: ci
+      LIVETRANSLATE_TEST_DATABASE_URL: postgres://ci:ci@localhost:5432/livetranslate_go_test?sslmode=disable
+      MIGRATE_DB: postgres://ci:ci@localhost:5432/livetranslate_migrate?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record environment
+        run: |
+          set -euo pipefail
+          go version
+          pg_isready -h localhost -p 5432 -U ci
+          psql --version
+
+      - name: Migrations 00001→00013 up on empty database (serve path)
+        run: |
+          set -euo pipefail
+          psql -h localhost -U ci -d postgres -c 'DROP DATABASE IF EXISTS livetranslate_migrate;'
+          psql -h localhost -U ci -d postgres -c 'CREATE DATABASE livetranslate_migrate;'
+          # The server's migrate subcommand applies the embedded chain via goose.
+          go build -o /tmp/livetranslate-server ./cmd/livetranslate-server
+          DATABASE_URL="$MIGRATE_DB" JWT_SECRET=ci-secret /tmp/livetranslate-server migrate
+          # Version must be the latest migration number.
+          version=$(psql -h localhost -U ci -d livetranslate_migrate -tAc 'SELECT max(version_id) FROM goose_db_version;')
+          echo "goose version: $version"
+          latest=$(ls db/migrations/*.sql | sed 's/.*\///;s/_.*//' | sort -n | tail -1)
+          [ "$version" = "$latest" ] || { echo "expected migration version $latest, got $version"; exit 1; }
+
+      - name: Migration down/up cycle (latest migration, fresh database)
+        run: |
+          set -euo pipefail
+          # goose CLI against the repo migrations directory on a separate DB.
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" down-to 00012
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
+          echo "down/up cycle OK"
+
+      - name: Integration tests (full stack on real PostgreSQL 16)
+        run: go test ./tests/integration/ -v -count=1
+
+  docker:
+    name: Docker image build + health/ready smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record environment
+        run: docker version && docker info --format '{{.OSType}}'
+
+      - name: Build image
+        run: docker build -t livetranslate-ci:latest .
+
+      - name: Verify image contents (non-root, binary, healthcheck)
+        run: |
+          set -euo pipefail
+          # Binary present and runnable (help exit code 0).
+          docker run --rm --entrypoint /usr/local/bin/livetranslate-server livetranslate-ci:latest help
+          # Non-root user.
+          user=$(docker run --rm --entrypoint id livetranslate-ci:latest)
+          echo "$user" | grep -v root || { echo "image runs as root"; exit 1; }
+          # Healthcheck instruction is defined.
+          docker inspect livetranslate-ci:latest --format '{{json .Config.Healthcheck}}' | grep -q -e pg_isready -e health -e wget
+
+      - name: health/ready smoke (serve + postgres on an ephemeral network)
+        run: |
+          set -euo pipefail
+          docker network create ci-net
+          # Postgres on the same network with the alias the server expects.
+          docker run -d --name ci-postgres --network ci-net \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=livetranslate \
+            postgres:16
+          trap 'docker logs ci-server 2>&1 | tail -50 || true; docker rm -f ci-server ci-postgres 2>/dev/null; docker network rm ci-net 2>/dev/null' EXIT
+          # Wait for postgres readiness before the server's boot migration.
+          for i in $(seq 1 30); do
+            docker exec ci-postgres pg_isready -U ci >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec ci-postgres pg_isready -U ci
+          # Server on 127.0.0.1:18000 only (loopback, not published).
+          docker run -d --name ci-server --network ci-net \
+            -e DATABASE_URL=postgres://ci:ci@ci-postgres:5432/livetranslate \
+            -e JWT_SECRET=ci-secret-smoke \
+            -e DEV_MODE=true \
+            -p 127.0.0.1:18000:8000 \
+            livetranslate-ci:latest
+          ready=0
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:18000/ready >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          [ "$ready" = 1 ] || { echo "server never became ready"; exit 1; }
+          curl -fsS http://127.0.0.1:18000/health | grep -q ok
+          curl -fsS http://127.0.0.1:18000/ready | grep -q ready
+          echo "health/ready smoke OK"

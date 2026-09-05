@@ -15,6 +15,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -361,6 +362,12 @@ func (s *Service) applyInterpreterTurn(ctx context.Context, q store.Q, userID uu
 	if p.TurnDetails != nil && *p.TurnDetails != "" && details == nil {
 		return rejectInterpreterItem(ctx, q, userID, item)
 	}
+	// Defensive content scrub (round 17): file-source labels
+	// ("<documentName> · 第N页") must never persist — old clients embed
+	// them in details.keywords; round-17 clients keep the labels
+	// device-local. Stored rows written before this deploy are cleaned by
+	// the iOS client on pull (same scrub, mirrored in Swift).
+	details = sanitizeInterpreterDetails(details)
 	modifiedAt := p.TurnModifiedAt
 
 	if obj == nil {
@@ -490,4 +497,59 @@ func rejectInterpreterItem(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return nil, err
 	}
 	return res, nil
+}
+
+// --- Details content scrub (round 17) -----------------------------------------------
+
+// citationLabelPattern matches the file-source label the iOS client (pre
+// round 17) embedded in turn-details keywords: "<documentName> · 第N页".
+// The label leaks the on-device file name of what may be a passport scan
+// or bank statement; round 17 keeps those labels device-local and mirrors
+// this scrub in Swift (InterpreterDetailsSanitizer) for pulls of rows
+// stored before the server learned to scrub.
+var citationLabelPattern = regexp.MustCompile(`^.+ · 第\s*[0-9]+\s*页$`)
+
+// sanitizeInterpreterDetails removes file-source labels from a turn's
+// details JSON and, when any were removed, marks hasLocalSources=true so
+// other devices render the honest "来源文件仅保存在原设备" note instead
+// of a dead link. Non-object JSON and details without labels pass through
+// unchanged (idempotent — an already-scrubbed value is byte-identical).
+func sanitizeInterpreterDetails(details *string) *string {
+	if details == nil {
+		return nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(*details), &doc); err != nil {
+		return details
+	}
+	keywords, ok := doc["keywords"].([]any)
+	if !ok {
+		return details
+	}
+	var kept []any
+	removed := false
+	for _, keyword := range keywords {
+		if s, isString := keyword.(string); isString && citationLabelPattern.MatchString(s) {
+			removed = true
+			continue
+		}
+		kept = append(kept, keyword)
+	}
+	if !removed {
+		return details
+	}
+	if len(kept) == 0 {
+		delete(doc, "keywords")
+	} else {
+		doc["keywords"] = kept
+	}
+	doc["hasLocalSources"] = true
+	out, err := json.Marshal(doc)
+	if err != nil {
+		// Unreachable for a map of decoded JSON values; keep the original
+		// rather than failing the whole push over a scrub.
+		return details
+	}
+	scrubbed := string(out)
+	return &scrubbed
 }

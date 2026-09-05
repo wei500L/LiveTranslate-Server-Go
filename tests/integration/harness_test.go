@@ -155,6 +155,7 @@ var allTables = []string{
 	"classroom_sessions", "transcript_entries", "bookmarks",
 	"favorite_sessions", "session_notes", "study_reviews",
 	"session_attachments", "sync_changes", "processed_operations",
+	"interpreter_conversations", "interpreter_turns",
 }
 
 func truncateAll(t *testing.T) {

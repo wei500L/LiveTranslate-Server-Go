@@ -158,6 +158,7 @@ func PurgeUserSyncData(ctx context.Context, q Q, userID uuid.UUID) error {
 		"assistant_messages", "assistant_threads",
 		"study_plan_items", "study_plans", "exam_topics", "exams",
 		"study_activities",
+		"interpreter_turns", "interpreter_conversations",
 		"sync_changes", "processed_operations",
 	} {
 		if _, err := q.Exec(ctx,

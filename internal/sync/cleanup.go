@@ -48,6 +48,7 @@ func (s *Service) RunTombstoneCleanup(ctx context.Context) error {
 		"assistant_messages", "assistant_threads",
 		"study_plan_items", "study_plans", "exam_topics", "exams",
 		"study_activities",
+		"interpreter_turns", "interpreter_conversations",
 	} {
 		tag, err := s.db.Q().Exec(ctx, `
 			DELETE FROM `+table+`

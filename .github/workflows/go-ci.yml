@@ -110,7 +110,7 @@ jobs:
           set -euo pipefail
           # goose CLI against the repo migrations directory on a separate DB.
           go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
-          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" down-to 00012
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" down-to 00013
           go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
           echo "down/up cycle OK"
 

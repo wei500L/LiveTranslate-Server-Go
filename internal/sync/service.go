@@ -1095,6 +1095,10 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyStudyPlanItem(ctx, q, userID, item)
 	case EntityStudyActivity:
 		return s.applyStudyActivity(ctx, q, userID, item)
+	case EntityInterpreterConversation:
+		return s.applyInterpreterConversation(ctx, q, userID, item)
+	case EntityInterpreterTurn:
+		return s.applyInterpreterTurn(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -4605,6 +4609,18 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return studyActivityRecordJSON(obj), nil
+	case EntityInterpreterConversation:
+		obj, err := fetchInterpreterConversation(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return interpreterConversationRecordJSON(obj), nil
+	case EntityInterpreterTurn:
+		obj, err := fetchInterpreterTurn(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return interpreterTurnRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -4616,6 +4632,7 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 	var tail, sessions, entries, courses, notes, reviews, attachments, terms, cards, tasks, corrections, schedules, exceptions int
 	var materials, materialPages, materialAnnotations, assistantThreads, assistantMessages int
 	var exams, examTopics, studyPlans, studyPlanItems, studyActivities int
+	var interpreterConversations, interpreterTurns int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -4640,41 +4657,46 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM exam_topics WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_plans WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_plan_items WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM study_activities WHERE user_id = $1 AND deleted_at IS NULL)`,
+			(SELECT count(*) FROM study_activities WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM interpreter_conversations WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM interpreter_turns WHERE user_id = $1 AND deleted_at IS NULL)`,
 		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions,
 		&materials, &materialPages, &materialAnnotations, &assistantThreads, &assistantMessages,
-		&exams, &examTopics, &studyPlans, &studyPlanItems, &studyActivities)
+		&exams, &examTopics, &studyPlans, &studyPlanItems, &studyActivities,
+		&interpreterConversations, &interpreterTurns)
 	if err != nil {
 		return nil, err
 	}
 	return &SyncStatusResponse{
-		SchemaVersion:             s.cfg.SchemaVersion,
-		MinClientSchemaVersion:    s.cfg.MinClientSchemaVersion,
-		MaxClientSchemaVersion:    s.cfg.MaxClientSchemaVersion,
-		ChangeLogTail:             int64(tail),
-		SessionCount:              sessions,
-		EntryCount:                entries,
-		CourseCount:               courses,
-		NoteCount:                 notes,
-		ReviewCount:               reviews,
-		AttachmentCount:           attachments,
-		TermCount:                 terms,
-		StudyCardCount:            cards,
-		StudyTaskCount:            tasks,
-		TranscriptCorrectionCount: corrections,
-		CourseScheduleCount:       schedules,
-		ScheduleExceptionCount:    exceptions,
-		MaterialCount:             materials,
-		MaterialPageCount:         materialPages,
-		MaterialAnnotationCount:   materialAnnotations,
-		AssistantThreadCount:      assistantThreads,
-		AssistantMessageCount:     assistantMessages,
-		ExamCount:                 exams,
-		ExamTopicCount:            examTopics,
-		StudyPlanCount:            studyPlans,
-		StudyPlanItemCount:        studyPlanItems,
-		StudyActivityCount:        studyActivities,
-		PendingCount:              0,
-		ServerTime:                time.Now(),
+		SchemaVersion:                s.cfg.SchemaVersion,
+		MinClientSchemaVersion:       s.cfg.MinClientSchemaVersion,
+		MaxClientSchemaVersion:       s.cfg.MaxClientSchemaVersion,
+		ChangeLogTail:                int64(tail),
+		SessionCount:                 sessions,
+		EntryCount:                   entries,
+		CourseCount:                  courses,
+		NoteCount:                    notes,
+		ReviewCount:                  reviews,
+		AttachmentCount:              attachments,
+		TermCount:                    terms,
+		StudyCardCount:               cards,
+		StudyTaskCount:               tasks,
+		TranscriptCorrectionCount:    corrections,
+		CourseScheduleCount:          schedules,
+		ScheduleExceptionCount:       exceptions,
+		MaterialCount:                materials,
+		MaterialPageCount:            materialPages,
+		MaterialAnnotationCount:      materialAnnotations,
+		AssistantThreadCount:         assistantThreads,
+		AssistantMessageCount:        assistantMessages,
+		ExamCount:                    exams,
+		ExamTopicCount:               examTopics,
+		StudyPlanCount:               studyPlans,
+		StudyPlanItemCount:           studyPlanItems,
+		StudyActivityCount:           studyActivities,
+		InterpreterConversationCount: interpreterConversations,
+		InterpreterTurnCount:         interpreterTurns,
+		PendingCount:                 0,
+		ServerTime:                   time.Now(),
 	}, nil
 }

@@ -327,6 +327,29 @@ type PushPayload struct {
 	PlanId     *uuid.UUID `json:"planId"`
 	PlanItemId *uuid.UUID `json:"planItemId"`
 	TopicId    *uuid.UUID `json:"topicId"`
+	// Interpreter conversations (00014). The conversation reference rides
+	// ConversationId (plain required reference — turns may arrive before
+	// their conversation, the term/card convention). Title rides the shared
+	// Title. Times are real timestamps. The structured-detail snapshot
+	// (InterpreterDetails) rides as a JSON STRING (the citations
+	// convention) — never raw model responses or prompts.
+	ConversationId      *uuid.UUID `json:"conversationId"`
+	InterpreterScene    *string    `json:"interpreterScene"`
+	InterpreterContext  *string    `json:"interpreterContextNote"`
+	InterpreterStatus   *string    `json:"interpreterStatus"`
+	InterpreterStarted  *time.Time `json:"interpreterStartedAt"`
+	InterpreterEnded    *time.Time `json:"interpreterEndedAt"`
+	TurnSpeaker         *string    `json:"turnSpeaker"`
+	TurnDirection       *string    `json:"turnDirection"`
+	TurnInputMethod     *string    `json:"turnInputMethod"`
+	TurnSequence        *int       `json:"turnSequence"`
+	TurnSource          *string    `json:"turnSourceText"`
+	TurnPlainRussian    *string    `json:"turnPlainRussian"`
+	TurnStressedRussian *string    `json:"turnStressedRussian"`
+	TurnChinese         *string    `json:"turnChineseText"`
+	TurnBackTranslation *string    `json:"turnBackTranslation"`
+	TurnDetails         *string    `json:"turnDetails"`
+	TurnModifiedAt      *time.Time `json:"turnModifiedAt"`
 }
 
 type PushItem struct {
@@ -379,34 +402,36 @@ type PullResponse struct {
 }
 
 type SyncStatusResponse struct {
-	SchemaVersion             int       `json:"schemaVersion"`
-	MinClientSchemaVersion    int       `json:"minClientSchemaVersion"`
-	MaxClientSchemaVersion    int       `json:"maxClientSchemaVersion"`
-	ChangeLogTail             int64     `json:"changeLogTail"`
-	SessionCount              int       `json:"sessionCount"`
-	EntryCount                int       `json:"entryCount"`
-	CourseCount               int       `json:"courseCount"`
-	NoteCount                 int       `json:"noteCount"`
-	ReviewCount               int       `json:"reviewCount"`
-	AttachmentCount           int       `json:"attachmentCount"`
-	TermCount                 int       `json:"termCount"`
-	StudyCardCount            int       `json:"studyCardCount"`
-	StudyTaskCount            int       `json:"studyTaskCount"`
-	TranscriptCorrectionCount int       `json:"transcriptCorrectionCount"`
-	CourseScheduleCount       int       `json:"courseScheduleCount"`
-	ScheduleExceptionCount    int       `json:"scheduleExceptionCount"`
-	MaterialCount             int       `json:"materialCount"`
-	MaterialPageCount         int       `json:"materialPageCount"`
-	MaterialAnnotationCount   int       `json:"materialAnnotationCount"`
-	AssistantThreadCount      int       `json:"assistantThreadCount"`
-	AssistantMessageCount     int       `json:"assistantMessageCount"`
-	ExamCount                 int       `json:"examCount"`
-	ExamTopicCount            int       `json:"examTopicCount"`
-	StudyPlanCount            int       `json:"studyPlanCount"`
-	StudyPlanItemCount        int       `json:"studyPlanItemCount"`
-	StudyActivityCount        int       `json:"studyActivityCount"`
-	PendingCount              int       `json:"pendingCount"`
-	ServerTime                time.Time `json:"serverTime"`
+	SchemaVersion                int       `json:"schemaVersion"`
+	MinClientSchemaVersion       int       `json:"minClientSchemaVersion"`
+	MaxClientSchemaVersion       int       `json:"maxClientSchemaVersion"`
+	ChangeLogTail                int64     `json:"changeLogTail"`
+	SessionCount                 int       `json:"sessionCount"`
+	EntryCount                   int       `json:"entryCount"`
+	CourseCount                  int       `json:"courseCount"`
+	NoteCount                    int       `json:"noteCount"`
+	ReviewCount                  int       `json:"reviewCount"`
+	AttachmentCount              int       `json:"attachmentCount"`
+	TermCount                    int       `json:"termCount"`
+	StudyCardCount               int       `json:"studyCardCount"`
+	StudyTaskCount               int       `json:"studyTaskCount"`
+	TranscriptCorrectionCount    int       `json:"transcriptCorrectionCount"`
+	CourseScheduleCount          int       `json:"courseScheduleCount"`
+	ScheduleExceptionCount       int       `json:"scheduleExceptionCount"`
+	MaterialCount                int       `json:"materialCount"`
+	MaterialPageCount            int       `json:"materialPageCount"`
+	MaterialAnnotationCount      int       `json:"materialAnnotationCount"`
+	AssistantThreadCount         int       `json:"assistantThreadCount"`
+	AssistantMessageCount        int       `json:"assistantMessageCount"`
+	ExamCount                    int       `json:"examCount"`
+	ExamTopicCount               int       `json:"examTopicCount"`
+	StudyPlanCount               int       `json:"studyPlanCount"`
+	StudyPlanItemCount           int       `json:"studyPlanItemCount"`
+	StudyActivityCount           int       `json:"studyActivityCount"`
+	InterpreterConversationCount int       `json:"interpreterConversationCount"`
+	InterpreterTurnCount         int       `json:"interpreterTurnCount"`
+	PendingCount                 int       `json:"pendingCount"`
+	ServerTime                   time.Time `json:"serverTime"`
 }
 
 // Entity constants (wire strings). "attachment" (11 chars) stays within
@@ -443,6 +468,10 @@ const (
 	EntityStudyPlan     = "study_plan"
 	EntityStudyPlanItem = "study_plan_item"
 	EntityStudyActivity = "study_activity"
+	// Interpreter (00014, 随身翻译): 24 / 17 chars — both fit the
+	// VARCHAR(32) entity_type columns.
+	EntityInterpreterConversation = "interpreter_conversation"
+	EntityInterpreterTurn         = "interpreter_turn"
 )
 
 func validEntityType(t string) bool {
@@ -458,7 +487,8 @@ func validEntityType(t string) bool {
 		t == EntityAssistantThread || t == EntityAssistantMessage ||
 		t == EntityExam || t == EntityExamTopic ||
 		t == EntityStudyPlan || t == EntityStudyPlanItem ||
-		t == EntityStudyActivity
+		t == EntityStudyActivity ||
+		t == EntityInterpreterConversation || t == EntityInterpreterTurn
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -901,6 +931,42 @@ type studyActivityRecord struct {
 	DurationSeconds int        `json:"activityDurationSeconds"`
 	Status          string     `json:"activityStatus"`
 	Note            string     `json:"activityNote"`
+	ServerVersion   int        `json:"serverVersion"`
+	Deleted         bool       `json:"deleted"`
+}
+
+// Interpreter records (00014): field names mirror the push payload (the
+// interpreterXxx / turnXxx families) so iOS decodes records and conflict
+// payloads with the same CodingKeys. Details rides as a JSON string (see
+// PushPayload.TurnDetails). modifiedAt is the user-edit tiebreak.
+type interpreterConversationRecord struct {
+	EntityType    string     `json:"entityType"`
+	ID            string     `json:"id"`
+	Title         string     `json:"title"`
+	Scene         string     `json:"interpreterScene"`
+	ContextNote   string     `json:"interpreterContextNote"`
+	Status        string     `json:"interpreterStatus"`
+	StartedAt     time.Time  `json:"interpreterStartedAt"`
+	EndedAt       *time.Time `json:"interpreterEndedAt,omitempty"`
+	ServerVersion int        `json:"serverVersion"`
+	Deleted       bool       `json:"deleted"`
+}
+
+type interpreterTurnRecord struct {
+	EntityType      string     `json:"entityType"`
+	ID              string     `json:"id"`
+	ConversationID  string     `json:"conversationId"`
+	Speaker         string     `json:"turnSpeaker"`
+	Direction       string     `json:"turnDirection"`
+	InputMethod     string     `json:"turnInputMethod"`
+	Sequence        int        `json:"turnSequence"`
+	SourceText      string     `json:"turnSourceText"`
+	PlainRussian    string     `json:"turnPlainRussian"`
+	StressedRussian string     `json:"turnStressedRussian"`
+	ChineseText     string     `json:"turnChineseText"`
+	BackTranslation string     `json:"turnBackTranslation"`
+	Details         *string    `json:"turnDetails,omitempty"`
+	ModifiedAt      *time.Time `json:"turnModifiedAt,omitempty"`
 	ServerVersion   int        `json:"serverVersion"`
 	Deleted         bool       `json:"deleted"`
 }

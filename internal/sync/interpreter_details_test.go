@@ -28,10 +28,7 @@ func TestSanitizeInterpreterDetails(t *testing.T) {
 	if got == nil {
 		t.Fatal("scrubbed details = nil")
 	}
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(*got), &doc); err != nil {
-		t.Fatalf("scrubbed details not valid JSON: %v", err)
-	}
+	doc := decodeDetails(t, *got)
 	keywords, _ := doc["keywords"].([]any)
 	if len(keywords) != 1 || keywords[0] != "Сумма: 15000₽" {
 		t.Fatalf("keywords after scrub = %v, want the non-source fact only", keywords)
@@ -47,9 +44,7 @@ func TestSanitizeInterpreterDetails(t *testing.T) {
 	// All-labels keywords: the key is removed, not left empty.
 	allLabels := `{"keywords":["登记表.pdf · 第2页","通知.jpg · 第 3 页"]}`
 	got = sanitizeInterpreterDetails(&allLabels)
-	if err := json.Unmarshal([]byte(*got), &doc); err != nil {
-		t.Fatalf("scrubbed details not valid JSON: %v", err)
-	}
+	doc = decodeDetails(t, *got)
 	if _, still := doc["keywords"]; still {
 		t.Fatalf("keywords key should be dropped when empty: %s", *got)
 	}
@@ -76,10 +71,20 @@ func TestSanitizeInterpreterDetails(t *testing.T) {
 	// the labels prove sources exist.
 	contradictory := `{"keywords":["签证.pdf · 第1页"],"hasLocalSources":false}`
 	got = sanitizeInterpreterDetails(&contradictory)
-	if err := json.Unmarshal([]byte(*got), &doc); err != nil {
-		t.Fatalf("scrubbed details not valid JSON: %v", err)
-	}
+	doc = decodeDetails(t, *got)
 	if has, _ := doc["hasLocalSources"].(bool); !has {
 		t.Fatalf("hasLocalSources = %v, want true after removing labels", doc["hasLocalSources"])
 	}
+}
+
+// decodeDetails parses details JSON into a FRESH map — json.Unmarshal
+// merges into a non-nil map, so reusing one would leak earlier keys into
+// later assertions.
+func decodeDetails(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	doc := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("details not valid JSON (%s): %v", raw, err)
+	}
+	return doc
 }

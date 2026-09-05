@@ -412,30 +412,46 @@ func (s *Service) applyInterpreterTurn(ctx context.Context, q store.Q, userID uu
 	}
 
 	// Merge: append-style row. User edits of the same turn resolve by
-	// modified_at (newer wins — the correction convention; absent keeps).
-	if modifiedAt == nil || (obj.modifiedAt != nil && obj.modifiedAt.After(*modifiedAt)) {
+	// modified_at (newer wins — the correction convention; absent keeps
+	// the stored timestamp). A stale text arriving with an older
+	// timestamp never overwrites the newer stored one.
+	stale := obj.modifiedAt != nil &&
+		(modifiedAt == nil || obj.modifiedAt.After(*modifiedAt))
+	if modifiedAt == nil {
 		modifiedAt = obj.modifiedAt
+	}
+	if stale {
+		sourceText = obj.sourceText
+		plainRussian = obj.plainRussian
+		stressedRussian = obj.stressedRussian
+		chineseText = obj.chineseText
+		backTranslation = obj.backTranslation
+		if details == nil {
+			details = obj.details
+		}
 	}
 	if sequence == 0 {
 		sequence = obj.sequence
 	}
-	if sourceText == "" {
-		sourceText = obj.sourceText
-	}
-	if plainRussian == "" {
-		plainRussian = obj.plainRussian
-	}
-	if stressedRussian == "" {
-		stressedRussian = obj.stressedRussian
-	}
-	if chineseText == "" {
-		chineseText = obj.chineseText
-	}
-	if backTranslation == "" {
-		backTranslation = obj.backTranslation
-	}
-	if details == nil {
-		details = obj.details
+	if !stale {
+		if sourceText == "" {
+			sourceText = obj.sourceText
+		}
+		if plainRussian == "" {
+			plainRussian = obj.plainRussian
+		}
+		if stressedRussian == "" {
+			stressedRussian = obj.stressedRussian
+		}
+		if chineseText == "" {
+			chineseText = obj.chineseText
+		}
+		if backTranslation == "" {
+			backTranslation = obj.backTranslation
+		}
+		if details == nil {
+			details = obj.details
+		}
 	}
 
 	var version int

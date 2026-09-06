@@ -220,13 +220,19 @@ func (s *Service) applyErrandCase(ctx context.Context, q store.Q, userID uuid.UU
 
 	// Validation before any write: enum fields must parse; the timezone,
 	// when present, must be a real IANA id (the course-schedule
-	// convention — a typo'd zone never persists).
+	// convention — a typo'd zone never persists). Absent enum pointers
+	// KEEP the stored value on merges (inserts fall back to defaults) —
+	// an absent pointer is "not changing it", never "reset it".
 	scene, status := "general", "preparing"
 	if p.ErrandScene != nil && *p.ErrandScene != "" {
 		scene = *p.ErrandScene
+	} else if obj != nil {
+		scene = obj.scene
 	}
 	if p.ErrandStatus != nil && *p.ErrandStatus != "" {
 		status = *p.ErrandStatus
+	} else if obj != nil {
+		status = obj.status
 	}
 	if !validInterpreterScenes[scene] || !validErrandCaseStatuses[status] {
 		return rejectErrandItem(ctx, q, userID, item)
@@ -383,12 +389,18 @@ func (s *Service) applyErrandCaseItem(ctx context.Context, q store.Q, userID uui
 	kind, status, origin := "action", "pending", "manual"
 	if p.ErrandItemKind != nil && *p.ErrandItemKind != "" {
 		kind = *p.ErrandItemKind
+	} else if obj != nil {
+		kind = obj.kind
 	}
 	if p.ErrandItemStatus != nil && *p.ErrandItemStatus != "" {
 		status = *p.ErrandItemStatus
+	} else if obj != nil {
+		status = obj.status
 	}
 	if p.ErrandItemOrigin != nil && *p.ErrandItemOrigin != "" {
 		origin = *p.ErrandItemOrigin
+	} else if obj != nil {
+		origin = obj.origin
 	}
 	if !validErrandItemKinds[kind] || !validErrandItemStatuses[status] ||
 		!validErrandItemOrigins[origin] {

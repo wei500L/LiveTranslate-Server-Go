@@ -90,7 +90,7 @@ jobs:
           pg_isready -h localhost -p 5432 -U ci
           psql --version
 
-      - name: Migrations 00001→00013 up on empty database (serve path)
+      - name: Migrations 00001→latest up on empty database (serve path)
         run: |
           set -euo pipefail
           psql -h localhost -U ci -d postgres -c 'DROP DATABASE IF EXISTS livetranslate_migrate;'
@@ -110,9 +110,14 @@ jobs:
           set -euo pipefail
           # goose CLI against the repo migrations directory on a separate DB.
           go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
-          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" down-to 00013
+          # Roll back to the version BEFORE the latest migration, then
+          # re-apply — the newest migration's Down must be honest.
+          latest=$((10#$(ls db/migrations/*.sql | sed 's/.*\///;s/_.*//' | sort -n | tail -1)))
+          prev=$((latest - 1))
+          printf -v padded '%04d' "$prev"
+          go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" down-to "$padded"
           go run github.com/pressly/goose/v3/cmd/goose@v3.24.3 -dir db/migrations postgres "$MIGRATE_DB" up
-          echo "down/up cycle OK"
+          echo "down/up cycle OK (latest=$latest, rolled back to $padded)"
 
       - name: Integration tests (full stack on real PostgreSQL 16)
         run: go test ./tests/integration/ -v -count=1

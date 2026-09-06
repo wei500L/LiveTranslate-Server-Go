@@ -156,6 +156,7 @@ var allTables = []string{
 	"favorite_sessions", "session_notes", "study_reviews",
 	"session_attachments", "sync_changes", "processed_operations",
 	"interpreter_conversations", "interpreter_turns",
+	"errand_cases", "errand_case_items",
 }
 
 func truncateAll(t *testing.T) {

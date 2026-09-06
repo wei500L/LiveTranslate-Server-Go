@@ -1099,6 +1099,10 @@ func (s *Service) applyOne(ctx context.Context, q store.Q, userID uuid.UUID, ite
 		return s.applyInterpreterConversation(ctx, q, userID, item)
 	case EntityInterpreterTurn:
 		return s.applyInterpreterTurn(ctx, q, userID, item)
+	case EntityErrandCase:
+		return s.applyErrandCase(ctx, q, userID, item)
+	case EntityErrandCaseItem:
+		return s.applyErrandCaseItem(ctx, q, userID, item)
 	default:
 		return s.applyStudyReview(ctx, q, userID, item)
 	}
@@ -4621,6 +4625,18 @@ func (s *Service) loadRecord(ctx context.Context, q store.Q, userID uuid.UUID, e
 			return nil, err
 		}
 		return interpreterTurnRecordJSON(obj), nil
+	case EntityErrandCase:
+		obj, err := fetchErrandCase(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return errandCaseRecordJSON(obj), nil
+	case EntityErrandCaseItem:
+		obj, err := fetchErrandCaseItem(ctx, q, userID, id)
+		if err != nil || obj == nil {
+			return nil, err
+		}
+		return errandCaseItemRecordJSON(obj), nil
 	}
 	return nil, nil
 }
@@ -4633,6 +4649,7 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 	var materials, materialPages, materialAnnotations, assistantThreads, assistantMessages int
 	var exams, examTopics, studyPlans, studyPlanItems, studyActivities int
 	var interpreterConversations, interpreterTurns int
+	var errandCases, errandCaseItems int
 	err := q.QueryRow(ctx, `
 		SELECT
 			COALESCE((SELECT max(change_sequence) FROM sync_changes WHERE user_id = $1), 0),
@@ -4659,11 +4676,14 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 			(SELECT count(*) FROM study_plan_items WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM study_activities WHERE user_id = $1 AND deleted_at IS NULL),
 			(SELECT count(*) FROM interpreter_conversations WHERE user_id = $1 AND deleted_at IS NULL),
-			(SELECT count(*) FROM interpreter_turns WHERE user_id = $1 AND deleted_at IS NULL)`,
+			(SELECT count(*) FROM interpreter_turns WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM errand_cases WHERE user_id = $1 AND deleted_at IS NULL),
+			(SELECT count(*) FROM errand_case_items WHERE user_id = $1 AND deleted_at IS NULL)`,
 		userID).Scan(&tail, &sessions, &entries, &courses, &notes, &reviews, &attachments, &terms, &cards, &tasks, &corrections, &schedules, &exceptions,
 		&materials, &materialPages, &materialAnnotations, &assistantThreads, &assistantMessages,
 		&exams, &examTopics, &studyPlans, &studyPlanItems, &studyActivities,
-		&interpreterConversations, &interpreterTurns)
+		&interpreterConversations, &interpreterTurns,
+		&errandCases, &errandCaseItems)
 	if err != nil {
 		return nil, err
 	}
@@ -4696,6 +4716,8 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*SyncStatusResp
 		StudyActivityCount:           studyActivities,
 		InterpreterConversationCount: interpreterConversations,
 		InterpreterTurnCount:         interpreterTurns,
+		ErrandCaseCount:              errandCases,
+		ErrandCaseItemCount:          errandCaseItems,
 		PendingCount:                 0,
 		ServerTime:                   time.Now(),
 	}, nil

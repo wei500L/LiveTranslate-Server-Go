@@ -350,6 +350,42 @@ type PushPayload struct {
 	TurnBackTranslation *string    `json:"turnBackTranslation"`
 	TurnDetails         *string    `json:"turnDetails"`
 	TurnModifiedAt      *time.Time `json:"turnModifiedAt"`
+	// Errand cases (00015, 办事事项). The case title and the item title
+	// both ride the shared Title. The scene reuses the interpreter
+	// allowlist (general|school|dorm|bank|hospital|migration|telecom|
+	// post). Times are real timestamps; due_at is the user-CONFIRMED
+	// instant while date_text preserves the source wording. The case
+	// reference rides CaseId (plain required reference — items may arrive
+	// before their case, the conversation/term convention). LOCAL SOURCE
+	// LINKS NEVER RIDE THE WIRE: only the content-free
+	// ErrandHasLocalSources flag does (the round-17 boundary — file
+	// names, page numbers, snippets, document ids stay device-local).
+	ErrandScene             *string    `json:"errandScene"`
+	ErrandStatus            *string    `json:"errandStatus"`
+	ErrandPurpose           *string    `json:"errandPurpose"`
+	ErrandNote              *string    `json:"errandNote"`
+	ErrandTimezone          *string    `json:"errandTimezone"`
+	ErrandLocation          *string    `json:"errandLocation"`
+	ErrandContact           *string    `json:"errandContact"`
+	ErrandExpectedResultAt  *time.Time `json:"errandExpectedResultAt"`
+	ErrandPinned            *bool      `json:"errandPinned"`
+	ErrandHasLocalSources   *bool      `json:"errandHasLocalSources"`
+	CaseID                  *uuid.UUID `json:"caseId"`
+	ErrandItemKind          *string    `json:"errandItemKind"`
+	ErrandItemStatus        *string    `json:"errandItemStatus"`
+	ErrandItemSequence      *int       `json:"errandItemSequence"`
+	ErrandItemDetail        *string    `json:"errandItemDetail"`
+	ErrandItemDueAt         *time.Time `json:"errandItemDueAt"`
+	ErrandItemDateText      *string    `json:"errandItemDateText"`
+	ErrandItemDateRelative  *bool      `json:"errandItemDateIsRelative"`
+	ErrandItemDateUncertain *bool      `json:"errandItemDateUncertain"`
+	ErrandItemOrigin        *string    `json:"errandItemOrigin"`
+	ErrandItemConfirmed     *bool      `json:"errandItemConfirmed"`
+	ErrandItemFeeText       *string    `json:"errandItemFeeText"`
+	ErrandItemFeeAmount     *float64   `json:"errandItemFeeAmount"`
+	ErrandItemFeeCurrency   *string    `json:"errandItemFeeCurrency"`
+	ErrandItemModifiedAt    *time.Time `json:"errandItemModifiedAt"`
+	ErrandItemCompletedAt   *time.Time `json:"errandItemCompletedAt"`
 }
 
 type PushItem struct {
@@ -430,6 +466,8 @@ type SyncStatusResponse struct {
 	StudyActivityCount           int       `json:"studyActivityCount"`
 	InterpreterConversationCount int       `json:"interpreterConversationCount"`
 	InterpreterTurnCount         int       `json:"interpreterTurnCount"`
+	ErrandCaseCount              int       `json:"errandCaseCount"`
+	ErrandCaseItemCount          int       `json:"errandCaseItemCount"`
 	PendingCount                 int       `json:"pendingCount"`
 	ServerTime                   time.Time `json:"serverTime"`
 }
@@ -472,6 +510,10 @@ const (
 	// VARCHAR(32) entity_type columns.
 	EntityInterpreterConversation = "interpreter_conversation"
 	EntityInterpreterTurn         = "interpreter_turn"
+	// Errand cases (00015, 办事事项): 11 / 16 chars — both fit the
+	// VARCHAR(32) entity_type columns.
+	EntityErrandCase     = "errand_case"
+	EntityErrandCaseItem = "errand_case_item"
 )
 
 func validEntityType(t string) bool {
@@ -488,7 +530,8 @@ func validEntityType(t string) bool {
 		t == EntityExam || t == EntityExamTopic ||
 		t == EntityStudyPlan || t == EntityStudyPlanItem ||
 		t == EntityStudyActivity ||
-		t == EntityInterpreterConversation || t == EntityInterpreterTurn
+		t == EntityInterpreterConversation || t == EntityInterpreterTurn ||
+		t == EntityErrandCase || t == EntityErrandCaseItem
 }
 
 // Record JSON builders — the exact shapes iOS SyncServerRecordDTO decodes.
@@ -969,4 +1012,51 @@ type interpreterTurnRecord struct {
 	ModifiedAt      *time.Time `json:"turnModifiedAt,omitempty"`
 	ServerVersion   int        `json:"serverVersion"`
 	Deleted         bool       `json:"deleted"`
+}
+
+// Errand-case records (00015): field names mirror the push payload (the
+// errandXxx / errandItemXxx families) so iOS decodes records and
+// conflict payloads with the same CodingKeys. The case title and the
+// item title ride the shared "title" key. Only the content-free
+// hasLocalSources flag reflects local sources — links never ride.
+type errandCaseRecord struct {
+	EntityType       string     `json:"entityType"`
+	ID               string     `json:"id"`
+	Title            string     `json:"title"`
+	Scene            string     `json:"errandScene"`
+	Status           string     `json:"errandStatus"`
+	Purpose          string     `json:"errandPurpose"`
+	UserNote         string     `json:"errandNote"`
+	Timezone         string     `json:"errandTimezone"`
+	Location         string     `json:"errandLocation"`
+	Contact          string     `json:"errandContact"`
+	ExpectedResultAt *time.Time `json:"errandExpectedResultAt,omitempty"`
+	Pinned           bool       `json:"errandPinned"`
+	HasLocalSources  bool       `json:"errandHasLocalSources"`
+	ServerVersion    int        `json:"serverVersion"`
+	Deleted          bool       `json:"deleted"`
+}
+
+type errandCaseItemRecord struct {
+	EntityType    string     `json:"entityType"`
+	ID            string     `json:"id"`
+	CaseID        string     `json:"caseId"`
+	Title         string     `json:"title"`
+	Kind          string     `json:"errandItemKind"`
+	Status        string     `json:"errandItemStatus"`
+	Sequence      int        `json:"errandItemSequence"`
+	Detail        string     `json:"errandItemDetail"`
+	DueAt         *time.Time `json:"errandItemDueAt,omitempty"`
+	DateText      string     `json:"errandItemDateText"`
+	DateRelative  bool       `json:"errandItemDateIsRelative"`
+	DateUncertain bool       `json:"errandItemDateUncertain"`
+	Origin        string     `json:"errandItemOrigin"`
+	Confirmed     bool       `json:"errandItemConfirmed"`
+	FeeText       string     `json:"errandItemFeeText"`
+	FeeAmount     *float64   `json:"errandItemFeeAmount,omitempty"`
+	FeeCurrency   string     `json:"errandItemFeeCurrency"`
+	ModifiedAt    *time.Time `json:"errandItemModifiedAt,omitempty"`
+	CompletedAt   *time.Time `json:"errandItemCompletedAt,omitempty"`
+	ServerVersion int        `json:"serverVersion"`
+	Deleted       bool       `json:"deleted"`
 }

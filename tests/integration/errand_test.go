@@ -206,7 +206,7 @@ func TestSyncErrandCaseLifecycle(t *testing.T) {
 		bad(func(p map[string]any) { p["errandItemKind"] = "snack" }),
 		bad(func(p map[string]any) { p["errandItemOrigin"] = "psychic" }),
 		bad(func(p map[string]any) { delete(p, "caseId") }),
-		bad(func(p map[string]any) { p["errandItemFeeCurrency"] = "RUBLES" }),
+		bad(func(p map[string]any) { p["errandItemFeeCurrency"] = "TOOLONGCUR" }),
 	}
 	_, _, out = e.push(t, u.AccessToken, ops...)
 	for i, res := range results(t, out) {

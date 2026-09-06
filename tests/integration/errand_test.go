@@ -317,8 +317,9 @@ func TestSyncErrandCaseLifecycle(t *testing.T) {
 			if rec["caseId"] != caseID {
 				t.Fatalf("item record case wrong: %v", rec)
 			}
-			if rec["errandItemFeeCurrency"] != "RUB" {
-				t.Fatalf("item record currency wrong: %v", rec)
+			// The appointment item carries the confirmed fee.
+			if rec["id"] == appt && rec["errandItemFeeCurrency"] != "RUB" {
+				t.Fatalf("appointment record currency wrong: %v", rec)
 			}
 		}
 	}

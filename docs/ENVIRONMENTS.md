@@ -43,6 +43,8 @@
 | `PPROF_ENABLED` | 可 true | 谨慎 | **默认 false** | 开启后仅 loopback 可访问 |
 | `LOG_LEVEL` | debug | info | info/warn | 结构化文本日志 |
 | `LISTEN_ADDR` | 127.0.0.1:8000 | 127.0.0.1:8000 | 127.0.0.1:8000（经 Caddy 暴露） | — |
+| `ATTACHMENT_STORAGE_DIR` | 可空 | 命名卷路径 | 命名卷路径 | 空=仅元数据同步；附件与资料文件不落盘 |
+| `MODEL_STORAGE_DIR` | 可空 | 命名卷路径 | 命名卷路径 | 空=不启用 `/v1/models` 模型下载；启用后先运行 `livetranslate-server download-models` 预下载（约 4.5 GB，SHA256 校验） |
 
 ## 生产启动校验（APP_ENV=production 时自动执行）
 

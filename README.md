@@ -46,6 +46,7 @@ go build -o /tmp/lts ./cmd/livetranslate-server
 | `DEV_MODE` | 开发便利；生产必须 false（admin cookie 会因此带 Secure） |
 | `DEV_LOGIN_ENABLED` | `/v1/auth/dev` 调试登录；生产必须 false |
 | `SMTP_*` | 生产邮件投递；缺 SMTP 且非 DEV_MODE 时注册返回 503 而非静默丢码 |
+| `MODEL_STORAGE_DIR` | 可选。启用 `/v1/models/ai` 模型下载路由（客户端可改为从本服务器下载离线模型，见下节） |
 
 ## 同步协议（v1，与 Python 版逐字节兼容）
 
@@ -77,6 +78,22 @@ iOS 客户端无需任何改动：
 - **管理员默认不能查看课堂俄语原文与中文译文**：所有列表/详情查询只取
   计数聚合，正文列不进 SQL，页面有明确提示。
 - 审计：管理员与账号安全事件落 `audit_events`（before/after 仅状态摘要）。
+
+## 模型托管（客户端离线模型下载源）
+
+iOS 客户端的离线翻译/图片理解模型（Hy-MT2 1.13 GB、MiLMMT 806 MB、Gemma 2.59 GB）默认从
+Hugging Face 固定 revision 下载。设置 `MODEL_STORAGE_DIR` 后，客户端可在「翻译模型管理」
+改选**云端服务器**下载源，从本服务器拉取（`/v1/models/ai`，Bearer 认证，支持 Range 断点续传）。
+
+```bash
+# 一次性预下载（幂等、可续传、逐文件 SHA256 校验，与客户端清单逐字节对齐）
+MODEL_STORAGE_DIR=/var/lib/livetranslate/models livetranslate-server download-models
+# docker compose 部署：
+docker compose run --rm api livetranslate-server download-models
+```
+
+路由：`GET /v1/models/ai`（目录+就绪状态）、`GET/HEAD /v1/models/ai/{id}/{file}`（文件）。
+客户端无论从哪个源下载都按自带 manifest 校验 SHA256——服务器只被信任「有」，不被信任「对」。
 
 ## 安全要点（实现承诺）
 

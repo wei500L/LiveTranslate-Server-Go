@@ -103,6 +103,18 @@ func (c *Config) ValidateProduction() error {
 			problems = append(problems, "ATTACHMENT_STORAGE_DIR must not point at the system temp directory")
 		}
 	}
+	// Model files are multi-GB, long-lived, and re-downloadable; the same
+	// absolute-path discipline applies (relative paths break under a
+	// different working directory).
+	if c.ModelStorageDir != "" {
+		if isPlaceholder(c.ModelStorageDir) {
+			problems = append(problems, "MODEL_STORAGE_DIR must be a real directory path, not a placeholder")
+		} else if !filepath.IsAbs(c.ModelStorageDir) {
+			problems = append(problems, "MODEL_STORAGE_DIR must be an absolute path")
+		} else if c.ModelStorageDir == "/tmp" || c.ModelStorageDir == "/var/tmp" {
+			problems = append(problems, "MODEL_STORAGE_DIR must not point at the system temp directory")
+		}
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("production configuration rejected:\n  - %s", strings.Join(problems, "\n  - "))
 	}

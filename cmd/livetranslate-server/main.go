@@ -6,6 +6,7 @@
 //	livetranslate-server create-admin # create an admin account (interactive)
 //	livetranslate-server enable-totp <username> # print a TOTP secret for an admin
 //	livetranslate-server migrate      # apply migrations and exit
+//	livetranslate-server download-models # pre-fetch client AI models (MODEL_STORAGE_DIR)
 package main
 
 import (
@@ -31,6 +32,8 @@ func main() {
 		err = runEnableTOTP(os.Args[2:])
 	case "migrate":
 		err = runMigrate()
+	case "download-models":
+		err = runDownloadModels()
 	case "import-sqlite":
 		err = runImportSQLite(os.Args[2:])
 	case "-h", "--help", "help":
@@ -58,6 +61,10 @@ usage:
   %[1]s enable-totp <username>
                      generate and enable a TOTP secret for an admin
   %[1]s migrate       apply database migrations and exit
+  %[1]s download-models
+                     pre-fetch the client's on-device AI models from their
+                     pinned upstreams into MODEL_STORAGE_DIR (verified,
+                     resumable, idempotent)
   %[1]s import-sqlite --source db.sqlite [--dry-run | --apply] [--report r.json]
                      one-shot import of the Python service's SQLite data
                      (default: dry-run, no writes)

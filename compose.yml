@@ -65,8 +65,13 @@ services:
       # bigger than photos, so their single-upload cap is higher.
       ATTACHMENT_STORAGE_DIR: ${ATTACHMENT_STORAGE_DIR:-/var/lib/livetranslate/attachments}
       MATERIAL_STORAGE_MAX_UPLOAD_BYTES: ${MATERIAL_STORAGE_MAX_UPLOAD_BYTES:-209715200}
+      # On-device AI model store (optional — empty = /v1/models routes off).
+      # Populate ONCE with: docker compose run --rm api livetranslate-server download-models
+      # (~4.5 GB from pinned Hugging Face revisions, SHA256 verified).
+      MODEL_STORAGE_DIR: ${MODEL_STORAGE_DIR:-/var/lib/livetranslate/models}
     volumes:
       - attachmentdata:/var/lib/livetranslate/attachments
+      - modeldata:/var/lib/livetranslate/models
     ports:
       # In production remove this mapping and proxy via Caddy/Nginx.
       - "8000:8000"
@@ -97,3 +102,4 @@ services:
 volumes:
   pgdata:
   attachmentdata:
+  modeldata:

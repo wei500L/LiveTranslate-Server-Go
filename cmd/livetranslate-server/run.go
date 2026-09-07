@@ -23,9 +23,11 @@ import (
 	authapi "livetranslate/server/internal/httpapi/auth"
 	materialapi "livetranslate/server/internal/httpapi/materialapi"
 	"livetranslate/server/internal/httpapi/middleware"
+	"livetranslate/server/internal/httpapi/modelapi"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
 	"livetranslate/server/internal/mail"
 	"livetranslate/server/internal/metrics"
+	"livetranslate/server/internal/modelstore"
 	"livetranslate/server/internal/storage"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
@@ -138,6 +140,19 @@ func runServe() error {
 		materialH := materialapi.NewHandler(st, authH, attachmentStore)
 		materialH.SetMaxUploadBytes(cfg.MaterialMaxUploadBytes)
 		materialH.Register(mux)
+	}
+
+	// On-device AI model store (optional — enabled by MODEL_STORAGE_DIR).
+	// When set, /v1/models/ai serves the pre-downloaded offline
+	// translation + image models to signed-in clients (populate with
+	// `livetranslate-server download-models`).
+	if cfg.ModelStorageDir != "" {
+		modelStore, err := modelstore.NewStore(cfg.ModelStorageDir)
+		if err != nil {
+			return fmt.Errorf("model storage: %w", err)
+		}
+		modelapi.NewHandler(authH, modelStore).Register(mux)
+		slog.Info("model storage enabled", "dir", modelStore.Root())
 	}
 	accountH := accountapi.NewHandler(st, authH, authSvc)
 	if attachmentStore != nil {

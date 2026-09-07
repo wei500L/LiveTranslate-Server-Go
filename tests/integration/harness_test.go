@@ -40,8 +40,10 @@ import (
 	accountapi "livetranslate/server/internal/httpapi/accountapi"
 	authapi "livetranslate/server/internal/httpapi/auth"
 	"livetranslate/server/internal/httpapi/middleware"
+	"livetranslate/server/internal/httpapi/modelapi"
 	syncapi "livetranslate/server/internal/httpapi/syncapi"
 	"livetranslate/server/internal/mail"
+	"livetranslate/server/internal/modelstore"
 	"livetranslate/server/internal/store"
 	syncpkg "livetranslate/server/internal/sync"
 	"livetranslate/server/internal/token"
@@ -226,7 +228,9 @@ type env struct {
 	cfg      *config.Config
 	api      *httptest.Server // /v1 — what iOS talks to
 	adminSrv *httptest.Server
-	mailer   *captureMailer
+	// Model store backing /v1/models/ai in this env (per-test temp dir).
+	modelStore *modelstore.Store
+	mailer     *captureMailer
 }
 
 // newEnv builds a full API + admin stack on a clean database. mutate adjusts
@@ -290,6 +294,13 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *env {
 	authH.Register(mux)
 	syncapi.NewHandler(cfg, syncSvc, authH).Register(mux)
 	accountapi.NewHandler(testDB, authH, authSvc).Register(mux)
+	// Model routes ride every test env against a per-test store dir
+	// (tests that don't care simply never hit them).
+	modelStore, err := modelstore.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelapi.NewHandler(authH, modelStore).Register(mux)
 	api := httptest.NewServer(httpapi.Handler(mux, cfg.MaxBodyBytes, 30*time.Second))
 
 	admSvc := admin.NewService(cfg, testDB, auditor, authSvc)
@@ -298,7 +309,7 @@ func newEnv(t *testing.T, mutate func(*config.Config)) *env {
 	admH.Register(admMux)
 	admSrv := httptest.NewServer(httpapi.Handler(admMux, 1<<20, 15*time.Second))
 
-	e := &env{t: t, cfg: cfg, api: api, adminSrv: admSrv, mailer: mailer}
+	e := &env{t: t, cfg: cfg, api: api, adminSrv: admSrv, mailer: mailer, modelStore: modelStore}
 	t.Cleanup(api.Close)
 	t.Cleanup(admSrv.Close)
 	return e

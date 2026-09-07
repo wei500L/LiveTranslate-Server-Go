@@ -201,3 +201,75 @@ func TestVerifyDetectsTruncation(t *testing.T) {
 		t.Fatal("verify must reject a truncated file")
 	}
 }
+
+func TestProgressCallbackThrottledAndFinal(t *testing.T) {
+	// Body of 100 MiB in 1 MiB chunks: with a 32 MiB interval the
+	// callback must fire ~4 times plus one final flush — never per Read.
+	body := make([]byte, 100<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := Model{
+		ID: "progress-model", File: "p.bin", Bytes: int64(len(body)),
+		SHA256: fmt.Sprintf("%x", sha256.Sum256(body)),
+	}
+	var calls int64
+	dl := Downloader{
+		Source:   func(Model) string { return srv.URL },
+		Progress: func(received, total int64) { calls++ },
+	}
+	store := newTestStore(t)
+	if err := dl.downloadOne(store, m); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if calls == 0 || calls > 6 {
+		t.Fatalf("progress callback must be throttled (~4 interval hits + 1 final), got %d calls", calls)
+	}
+}
+
+func TestProgressCountsResumeOffset(t *testing.T) {
+	// A resumed download reports ABSOLUTE byte counts: the first callback
+	// after 32 MiB of new bytes must be >= the resumed-from offset.
+	full := make([]byte, 64<<20)
+	m := Model{
+		ID: "resume-progress", File: "rp.bin", Bytes: int64(len(full)),
+		SHA256: fmt.Sprintf("%x", sha256.Sum256(full)),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rg := r.Header.Get("Range")
+		if strings.HasPrefix(rg, "bytes=") {
+			var from int
+			fmt.Sscanf(rg, "bytes=%d-", &from)
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[from:])
+			return
+		}
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	dir := filepath.Join(store.Root(), m.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-plant the first 40 MiB: the remaining 24 MiB is below the 32 MiB
+	// interval, so the ONLY callback is the final flush — and it must
+	// report the absolute 64 MiB, not the 24 MiB delta.
+	if err := os.WriteFile(filepath.Join(dir, m.File+".partial"), full[:40<<20], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got int64 = -1
+	dl := Downloader{
+		Source:   func(Model) string { return srv.URL },
+		Progress: func(received, total int64) { got = received },
+	}
+	if err := dl.downloadOne(store, m); err != nil {
+		t.Fatalf("resume download: %v", err)
+	}
+	if got != int64(len(full)) {
+		t.Fatalf("final progress must be absolute bytes (%d), got %d", len(full), got)
+	}
+}

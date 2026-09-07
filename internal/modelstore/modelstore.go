@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Model is one downloadable client model. The values MUST stay in lockstep
@@ -157,6 +158,15 @@ type Downloader struct {
 	Source func(m Model) string
 	Client *http.Client
 	Log    func(format string, args ...any)
+	// Progress, when set, receives byte-level progress for the current
+	// model: (bytesReceivedSoFar, totalBytes). Called from the download
+	// goroutine — keep it cheap (a shared *progressWriter fans bytes in).
+	Progress func(received, total int64)
+	// OnModelStart/OnModelDone bracket each model's download (verbatim
+	// after the "downloading…" log line / before the command exits or
+	// moves on). The CLI uses them to reset its progress timer and label.
+	OnModelStart func(m Model)
+	OnModelDone  func(m Model)
 }
 
 func (d Downloader) source(m Model) string {
@@ -170,7 +180,19 @@ func (d Downloader) client() *http.Client {
 	if d.Client != nil {
 		return d.Client
 	}
-	return http.DefaultClient
+	// No timeout by default mirrors http.DefaultClient, but downloads are
+	// multi-GB and a hung TCP connection (no FIN, no reset) would stall the
+	// command forever with no output. ResponseHeaderTimeout rejects a
+	// silent upstream before the first byte; a read-idle deadline (via
+	// http.ResponseController, see downloadOne) kills a connection that
+	// goes silent mid-body without punishing slow-but-alive transfers.
+	// Callers that supply their own Client own this policy.
+	return &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 60 * time.Second,
+		},
+	}
 }
 
 func (d Downloader) logf(format string, args ...any) {
@@ -194,10 +216,16 @@ func (d Downloader) DownloadAll(store *Store) error {
 			_ = os.Remove(store.path(m))
 		}
 		d.logf("%s: downloading %s (%.2f GiB)", m.ID, m.Title, float64(m.Bytes)/(1<<30))
+		if d.OnModelStart != nil {
+			d.OnModelStart(m)
+		}
 		if err := d.downloadOne(store, m); err != nil {
 			return fmt.Errorf("%s: %w", m.ID, err)
 		}
 		d.logf("%s: verified (sha256 ok)", m.ID)
+		if d.OnModelDone != nil {
+			d.OnModelDone(m)
+		}
 	}
 	return nil
 }
@@ -249,8 +277,23 @@ func (d Downloader) downloadOne(store *Store, m Model) error {
 			return err
 		}
 	}
-	_, copyErr := io.Copy(f, resp.Body)
+	// Byte-level progress through the download body; the hash walk below
+	// re-uses the sink to keep the CLI's percentage honest end to end.
+	// received starts at the resume offset so percentages are absolute.
+	// Read-idle deadline: a connection that goes silent for
+	// readIdleTimeout aborts the copy with an error (the operator re-runs
+	// and resumes from .partial) instead of stalling the command forever.
+	body := &deadlineBody{Response: resp}
+	pw := &progressWriter{
+		onChunk:  d.Progress,
+		total:    m.Bytes,
+		received: offset,
+		nextAt:   offset,
+		poke:     body.poke,
+	}
+	_, copyErr := io.Copy(io.MultiWriter(f, pw), body)
 	closeErr := f.Close()
+	pw.finish()
 	if copyErr != nil {
 		return fmt.Errorf("download: %w", copyErr)
 	}
@@ -281,4 +324,82 @@ func (d Downloader) downloadOne(store *Store, m Model) error {
 		return fmt.Errorf("sha256 mismatch: have %s, expected %s", got[:16]+"…", m.SHA256[:16]+"…")
 	}
 	return os.Rename(partial, dest)
+}
+
+// progressWriter fans download bytes into the Downloader.Progress hook,
+// throttled to at most one callback per interval (an unthrottled per-Read
+// callback on a fast link would flood the CLI logger). Every Write rolls
+// the body's read deadline via poke so a silent connection is cut after
+// readIdleTimeout.
+type progressWriter struct {
+	onChunk  func(received, total int64)
+	poke     func()
+	total    int64
+	received int64
+	nextAt   int64
+	finished bool
+}
+
+const progressIntervalBytes = 32 << 20 // report every 32 MiB (and at end)
+const readIdleTimeout = 5 * time.Minute
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	if p.poke != nil {
+		p.poke()
+	}
+	p.received += int64(len(b))
+	if p.onChunk != nil && p.received >= p.nextAt {
+		p.nextAt = p.received + progressIntervalBytes
+		p.onChunk(p.received, p.total)
+	}
+	return len(b), nil
+}
+
+// finish flushes the final callback exactly once.
+func (p *progressWriter) finish() {
+	if p.finished || p.onChunk == nil {
+		return
+	}
+	p.finished = true
+	p.onChunk(p.received, p.total)
+}
+
+// deadlineBody wraps a response body with a rolling read deadline: each
+// successful Read (surfaced through poke) extends it; a connection that
+// delivers nothing for readIdleTimeout fails the next Read with the
+// deadline error. If the underlying transport does not support deadlines
+// (SetReadDeadline errors), reads proceed without one — same behavior as
+// http.DefaultClient, never worse.
+type deadlineBody struct {
+	Response *http.Response
+	lastErr  error
+}
+
+func (b *deadlineBody) poke() {
+	// Deadline errors are expected once the idle timeout trips; do not
+	// re-arm after that.
+	if b.lastErr == nil {
+		b.lastErr = b.setDeadline(time.Now().Add(readIdleTimeout))
+	}
+}
+
+func (b *deadlineBody) setDeadline(t time.Time) error {
+	conn := b.Response.Body
+	for {
+		d, ok := conn.(interface{ SetReadDeadline(time.Time) error })
+		if ok {
+			return d.SetReadDeadline(t)
+		}
+		u, ok := conn.(interface{ Unwrap() error })
+		if !ok {
+			return nil // no deadline support: proceed without
+		}
+		if err := u.Unwrap(); err != nil {
+			return err // wrapper holds an error, e.g. the tripped deadline
+		}
+	}
+}
+
+func (b *deadlineBody) Read(p []byte) (int, error) {
+	return b.Response.Body.Read(p)
 }
